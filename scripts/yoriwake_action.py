@@ -429,9 +429,16 @@ def set_outputs(**values):
 
 
 def event():
-    """The event's name and payload. A test of the action may supply both instead of the runner's."""
-    name = os.environ.get("YORIWAKE_EVENT_NAME") or os.environ.get("GITHUB_EVENT_NAME", "")
-    path = os.environ.get("YORIWAKE_EVENT_PATH") or os.environ.get("GITHUB_EVENT_PATH", "")
+    """The event's name and payload. A dispatched test of the action may supply both instead.
+
+    Only on a dispatched run: elsewhere an earlier step can set the variables through
+    GITHUB_ENV, and a pull request's code posing as a push would save the map.
+    """
+    name = os.environ.get("GITHUB_EVENT_NAME", "")
+    path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if name == "workflow_dispatch":
+        name = os.environ.get("YORIWAKE_EVENT_NAME") or name
+        path = os.environ.get("YORIWAKE_EVENT_PATH") or path
     try:
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)

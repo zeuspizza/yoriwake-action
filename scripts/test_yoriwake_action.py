@@ -528,8 +528,8 @@ class CommandLine(unittest.TestCase):
     def outputs(self):
         return dict(line.split("=", 1) for line in self.out.read_text().splitlines() if line)
 
-    def payload(self, data):
-        path = self.tmp / "event.json"
+    def payload(self, data, name="event.json"):
+        path = self.tmp / name
         path.write_text(json.dumps(data) if not isinstance(data, str) else data)
         return str(path)
 
@@ -555,10 +555,22 @@ class CommandLine(unittest.TestCase):
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_EVENT_PATH": self.payload({}),
             "YORIWAKE_EVENT_NAME": "push",
-            "YORIWAKE_EVENT_PATH": self.payload(push()),
+            "YORIWAKE_EVENT_PATH": self.payload(push(), "push.json"),
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs()["save"], "true")
+
+    def test_an_overriding_event_is_ignored_unless_the_run_was_dispatched(self):
+        for real in ("pull_request_target", "issue_comment", "workflow_run", "pull_request", ""):
+            self.out.write_text("")
+            result = self.run_helper("flags", {
+                "GITHUB_EVENT_NAME": real,
+                "GITHUB_EVENT_PATH": self.payload(pull_request()),
+                "YORIWAKE_EVENT_NAME": "push",
+                "YORIWAKE_EVENT_PATH": self.payload(push(), "push.json"),
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.outputs()["save"], "false", real)
 
     def test_an_unreadable_payload_records_and_warns(self):
         result = self.run_helper("flags", {
