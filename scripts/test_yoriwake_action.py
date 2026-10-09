@@ -610,5 +610,70 @@ class CommandLine(unittest.TestCase):
         self.assertIn("did not run", summary.read_text())
 
 
+def gradle_step_script():
+    """The `run` block of action.yml's gradle step, as bash receives it."""
+    lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
+    start = lines.index("    - id: gradle")
+    body_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |") + 1
+    body = []
+    for line in lines[body_at:]:
+        if line.strip() and not line.startswith("        "):
+            break
+        body.append(line[8:])
+    return "\n".join(body) + "\n"
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is not installed")
+class GradleStepDropsOwnedFlags(unittest.TestCase):
+    """Only the gradle step's bash keeps the user's yoriwake flags off the real Gradle command,
+    and it must drop exactly what `owned_flags` names, or a run that records could select."""
+
+    CHOSEN = "-Pyoriwake.select -Pyoriwake.base=origin/main"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        gradlew = self.tmp / "gradlew"
+        gradlew.write_text('#!/bin/sh\nfor arg in "$@"; do echo "$arg"; done > argv\n')
+        gradlew.chmod(0o755)
+        self.script = self.tmp / "gradle-step.sh"
+        self.script.write_text(gradle_step_script())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def gradle_argv(self, tasks, gradle_args):
+        result = subprocess.run(
+            ["bash", "-e", str(self.script)],
+            env={"PATH": os.environ["PATH"], "STATE": "", "TASKS": tasks,
+                 "GRADLE_ARGS": gradle_args, "FLAGS_OUTCOME": "success", "FLAGS": self.CHOSEN},
+            cwd=self.tmp, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (self.tmp / "argv").read_text().splitlines()
+
+    def test_owned_flags_never_reach_gradle_and_the_run_records(self):
+        for tasks, gradle_args in (
+            ("test", "-Pyoriwake.select"),
+            ("test", "--info -Pyoriwake.base=origin/x"),
+            ("test", "-P yoriwake.observe"),
+            ("test", "--project-prop yoriwake.complement=true"),
+            ("test", "--project-prop=yoriwake.fullRun"),
+            ("test -Pyoriwake.complement", ""),
+            ("test", "-Dorg.gradle.project.yoriwake.select=true"),
+        ):
+            owned = ya.owned_flags(tasks, gradle_args)
+            self.assertTrue(owned, gradle_args)
+            kept = [arg for arg in f"{tasks} {gradle_args}".split()
+                    if arg not in owned and arg not in ("-P", "--project-prop")]
+            self.assertEqual(self.gradle_argv(tasks, gradle_args), kept, gradle_args)
+
+    def test_near_misses_reach_gradle_with_the_chosen_flags(self):
+        for gradle_args in ("-Pyoriwake.selectX", "-Pyoriwake.isolatedCapture",
+                            "-Pyoriwake.alwaysRun=a.B", "-P yoriwake.baseline=1"):
+            self.assertEqual(ya.owned_flags("test", gradle_args), [], gradle_args)
+            self.assertEqual(self.gradle_argv("test", gradle_args),
+                             ["test", *gradle_args.split(), *self.CHOSEN.split()], gradle_args)
+
+
 if __name__ == "__main__":
     unittest.main()

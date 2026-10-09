@@ -181,6 +181,8 @@ runs:
         args=()
         dropped=""
         for arg in $TASKS $GRADLE_ARGS; do
+          # The same flags as OWNED_FLAG in scripts/yoriwake_action.py, here so they are dropped
+          # even without Python; change both together.
           case "$arg" in
             *yoriwake.select | *yoriwake.select=* | *yoriwake.observe | *yoriwake.observe=* \
             | *yoriwake.complement | *yoriwake.complement=* | *yoriwake.fullRun | *yoriwake.fullRun=* \

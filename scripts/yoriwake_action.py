@@ -28,7 +28,8 @@ from typing import NamedTuple
 FULL_RUN_LABEL = "yoriwake:full-run"
 
 # The flags this action sets. One named in the action's inputs would change what runs without
-# the action knowing, so such a run records instead.
+# the action knowing, so such a run records instead. The gradle step in action.yml drops the
+# same flags from the Gradle command in bash; change both together.
 OWNED_FLAG = re.compile(r"yoriwake\.(select|observe|complement|fullRun|base)(=|$)")
 
 # Deepening steps for a shallow clone, after the base's own tip: commits from each tip, then all.
