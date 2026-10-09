@@ -1,0 +1,10 @@
+# test	verdict	reason
+#!record-version	2
+#!rows	5
+#!writer	1 of 1
+#!outcome	selection-not-requested
+[engine:junit-jupiter]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:hasALabel()]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doubles()]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doublesAgain()]	included	SELECTION_NOT_REQUESTED

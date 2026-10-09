@@ -1,0 +1,31 @@
+# test	verdict	reason
+#!record-version	2
+#!rows	17
+#!writer	1 of 1
+#!input.yoriwake.select	false
+#!input.yoriwake.refused	a full run was requested with -Pyoriwake.fullRun
+#!input.yoriwake.refused.kind	full-run-requested
+#!outcome	full-run
+#!full-run-kind	daemon-refused
+#!refusal-kind	full-run-requested
+#!declines	full-run-requested
+#!full-run-reason	a full run was requested with -Pyoriwake.fullRun
+#!rules	no-change-set
+#!forcing-kinds	daemon-refused
+[engine:junit-jupiter]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:hasALabel()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doubles()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doublesAgain()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:hasALabel()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doubles()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doublesAgain()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.DeltaShapeTest]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.DeltaShapeTest]/[method:exposesExactlyTheMethodsItsContractPromises()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]/[method:everyRegisteredTypeExposesTheMethodsTheRegistryPromises()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:hasALabel()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doubles()]	included	DAEMON_REFUSED
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doublesAgain()]	included	DAEMON_REFUSED

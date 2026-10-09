@@ -1,0 +1,254 @@
+name: yoriwake
+description: >-
+  Turns on yoriwake test selection in GitHub Actions: caches the coverage map, fetches enough
+  history, chooses the flags for the event, runs Gradle and summarises what ran.
+author: zeuspizza
+
+inputs:
+  tasks:
+    description: The Gradle tasks to run, separated by spaces.
+    default: test
+  gradle-args:
+    description: >-
+      More arguments for Gradle, separated by spaces (no quoting). The action sets yoriwake's
+      select, observe, complement, fullRun and base properties itself: naming one here makes the
+      run record every test.
+    default: ''
+  observe:
+    description: >-
+      On pull requests, run every test and report what selection would have left out, instead of
+      selecting.
+    default: 'false'
+  isolated-capture:
+    description: >-
+      Record the map with a fresh test JVM per test class on the runs that save it (pushes to the
+      default branch and schedules).
+    default: 'false'
+  key:
+    description: >-
+      Added to the cache key. Required in a matrix, so each leg keeps its own map; without it a
+      matrix job records every test.
+    default: ''
+  working-directory:
+    description: The directory holding `gradlew`.
+    default: '.'
+  map-dir:
+    description: The map directory to cache. Defaults to `<working-directory>/.gradle/yoriwake`.
+    default: ''
+  default-branch:
+    description: >-
+      The branch whose pushes record and save the map. Defaults to the repository's default branch.
+    default: ''
+
+outputs:
+  run-kind:
+    description: '`select`, `observe` or `record`: what the action asked Gradle for.'
+    value: ${{ steps.flags.outputs.kind || 'record' }}
+  flags:
+    description: The yoriwake flags the action passed to Gradle.
+    value: ${{ steps.flags.outputs.flags }}
+  map-restored:
+    description: '`true` when a map was restored from the cache.'
+    value: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key != '' }}
+  history-ready:
+    description: >-
+      `true` when a pull request's base and the restored maps' capture commits were reachable;
+      empty when the run did not need them.
+    value: ${{ steps.deepen.outputs.history-ready }}
+
+runs:
+  using: composite
+  steps:
+    # Every step of the action's own continues on error, and the flag step adds a selection flag
+    # only when each step before it reported success with the exact value `true`. So any failure
+    # here leaves a run that records every test, and only Gradle can fail the job.
+    - id: setup
+      continue-on-error: true
+      shell: bash
+      env:
+        MAP_FORMAT: '7'
+        INPUT_KEY: ${{ inputs.key }}
+        INPUT_MAP_DIR: ${{ inputs.map-dir }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        WORKFLOW: ${{ github.workflow }}
+        JOB: ${{ github.job }}
+        OS: ${{ runner.os }}
+        SHA: ${{ github.sha }}
+      run: |
+        state="$RUNNER_TEMP/yoriwake-action/$GITHUB_ACTION"
+        rm -rf "$state"
+        mkdir -p "$state"
+        echo "state=$state" >> "$GITHUB_OUTPUT"
+        echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+        python=""
+        for candidate in python3 python; do
+          if command -v "$candidate" > /dev/null 2>&1 \
+              && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 8))' > /dev/null 2>&1; then
+            python="$candidate"
+            break
+          fi
+        done
+        if [ -z "$python" ]; then
+          msg="no Python 3.8 or later on this runner, so this run records every test"
+          echo "$msg" >> "$state/warnings"
+          echo "::warning title=yoriwake::$msg"
+        fi
+        echo "python=$python" >> "$GITHUB_OUTPUT"
+
+        map_dir="${INPUT_MAP_DIR:-${INPUT_WORKING_DIRECTORY%/}/.gradle/yoriwake}"
+        map_dir="${map_dir#./}"
+        echo "map-dir=$map_dir" >> "$GITHUB_OUTPUT"
+
+        # A cache key cannot hold a comma.
+        part() { printf '%s' "$1" | tr ',\n' '__'; }
+        prefix="yoriwake-$(part "$OS")-$(part "$WORKFLOW")-$(part "$JOB")-$(part "$INPUT_KEY")-map$MAP_FORMAT-"
+        echo "restore-prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "key=$prefix$SHA" >> "$GITHUB_OUTPUT"
+
+    - id: restore
+      if: steps.setup.outcome == 'success'
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.setup.outputs.map-dir }}
+          !${{ steps.setup.outputs.map-dir }}/*/raw
+        key: ${{ steps.setup.outputs.key }}
+        restore-keys: ${{ steps.setup.outputs.restore-prefix }}
+
+    # The summary reads only what this run writes. Without a restored map nothing in the
+    # directory can be trusted, a partly extracted one included, so all of it goes.
+    - id: clear
+      if: steps.setup.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+        MAP_RESTORED: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key != '' }}
+      run: |
+        if [ "$MAP_RESTORED" != "true" ]; then
+          rm -rf "$MAP_DIR"
+        else
+          rm -f "$MAP_DIR"/*/decisions.tsv "$MAP_DIR"/*/decisions.tsv.*.part "$MAP_DIR"/*/observation.json
+        fi
+
+    - id: deepen
+      if: >-
+        steps.setup.outputs.python != ''
+        && steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" deepen'
+
+    - id: flags
+      if: steps.setup.outputs.python != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_OBSERVE: ${{ inputs.observe }}
+        YORIWAKE_ISOLATED_CAPTURE: ${{ inputs.isolated-capture }}
+        YORIWAKE_DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        YORIWAKE_MAP_RESTORED: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key != '' }}
+        YORIWAKE_HISTORY_READY: ${{ steps.deepen.outcome == 'success' && steps.deepen.outputs.history-ready || '' }}
+        YORIWAKE_JOB_TOTAL: ${{ strategy.job-total }}
+        YORIWAKE_KEY: ${{ inputs.key }}
+        YORIWAKE_TASKS: ${{ inputs.tasks }}
+        YORIWAKE_GRADLE_ARGS: ${{ inputs.gradle-args }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" flags'
+
+    - id: gradle
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        STATE: ${{ steps.setup.outputs.state }}
+        TASKS: ${{ inputs.tasks }}
+        GRADLE_ARGS: ${{ inputs.gradle-args }}
+        FLAGS_OUTCOME: ${{ steps.flags.outcome }}
+        FLAGS: ${{ steps.flags.outputs.flags }}
+      run: |
+        warn() {
+          if [ -n "$STATE" ]; then echo "$1" >> "$STATE/warnings"; fi
+          echo "::warning title=yoriwake::$1"
+        }
+        # Stated on the command line, which outranks gradle.properties and the environment.
+        OFF="-Pyoriwake.select=false -Pyoriwake.observe=false"
+        set -f
+        args=()
+        dropped=""
+        for arg in $TASKS $GRADLE_ARGS; do
+          # The same flags as OWNED_FLAG in scripts/yoriwake_action.py, here so they are dropped
+          # even without Python; change both together.
+          case "$arg" in
+            *yoriwake.select | *yoriwake.select=* | *yoriwake.observe | *yoriwake.observe=* \
+            | *yoriwake.complement | *yoriwake.complement=* | *yoriwake.fullRun | *yoriwake.fullRun=* \
+            | *yoriwake.base | *yoriwake.base=*)
+              dropped="$dropped $arg"
+              last=$(( ${#args[@]} - 1 ))
+              if [ "$last" -ge 0 ] && { [ "${args[$last]}" = "-P" ] || [ "${args[$last]}" = "--project-prop" ]; }; then
+                unset "args[$last]"
+                args=("${args[@]}")
+              fi
+              ;;
+            *) args+=("$arg") ;;
+          esac
+        done
+        if [ -n "$dropped" ]; then
+          warn "left out of the Gradle command:$dropped. The action sets those flags itself; this run records every test"
+          FLAGS="$OFF"
+        elif [ "$FLAGS_OUTCOME" != "success" ]; then
+          warn "the flags could not be chosen, so this run records every test"
+          FLAGS="$OFF"
+        fi
+        echo "./gradlew ${args[*]} $FLAGS"
+        # shellcheck disable=SC2086 # the flags are words to split; globbing is off
+        ./gradlew "${args[@]}" $FLAGS
+
+    - id: summary
+      if: ${{ !cancelled() && steps.setup.outputs.python != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+        YORIWAKE_STARTED: ${{ steps.setup.outputs.started }}
+        YORIWAKE_KIND: ${{ steps.flags.outcome == 'success' && steps.flags.outputs.kind || '' }}
+        YORIWAKE_FLAGS: ${{ steps.flags.outcome == 'success' && steps.flags.outputs.flags || '' }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" summary'
+
+    - if: ${{ !cancelled() && steps.summary.outputs.observations == 'true' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: yoriwake-observation-${{ github.sha }}-${{ github.job }}-${{ strategy.job-index }}
+        path: ${{ steps.summary.outputs.observation-dir }}
+
+    # Saves only what a run of the default branch's own commit recorded: an event that can check
+    # out pull request code never reaches this step.
+    - id: save-check
+      if: ${{ !cancelled() && steps.flags.outcome == 'success' && steps.flags.outputs.save == 'true' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        head=$(git rev-parse HEAD)
+        if [ "$head" = "$GITHUB_SHA" ]; then
+          echo "save=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=yoriwake::HEAD is $head, not the commit this run was started for ($GITHUB_SHA), so the map is not saved"
+        fi
+
+    - if: ${{ !cancelled() && steps.save-check.outputs.save == 'true' }}
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.setup.outputs.map-dir }}
+          !${{ steps.setup.outputs.map-dir }}/*/raw
+        key: ${{ steps.setup.outputs.key }}

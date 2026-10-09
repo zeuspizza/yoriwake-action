@@ -1,0 +1,47 @@
+# test	verdict	reason
+#!record-version	2
+#!rows	11
+#!writer	1 of 1
+#!input.yoriwake.select	true
+#!input.yoriwake.change.classes	dev.demo.Alpha
+#!input.yoriwake.change.accountedFor	false
+#!input.yoriwake.change.absenceProvable	dev.demo.Alpha
+#!input.yoriwake.select.classGranularity	false
+#!outcome	full-run
+#!full-run-reason	the run observes selection, so every test runs
+#!observed-outcome	narrowed
+#!rules	complete
+#!forcing-kinds	none
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:hasALabel()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doubles()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doublesAgain()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:hasALabel()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doubles()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doublesAgain()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.DeltaShapeTest]/[method:exposesExactlyTheMethodsItsContractPromises()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]/[method:everyRegisteredTypeExposesTheMethodsTheRegistryPromises()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:hasALabel()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doubles()]	included	OBSERVING
+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doublesAgain()]	included	OBSERVING
+#+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:hasALabel()]	reaches-change,shares-jvm-changed-class
+#+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doubles()]	reaches-change,shares-jvm-changed-class
+#+[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doublesAgain()]	reaches-change,shares-jvm-changed-class
+#+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:hasALabel()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doubles()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doublesAgain()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.DeltaShapeTest]/[method:exposesExactlyTheMethodsItsContractPromises()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]/[method:everyRegisteredTypeExposesTheMethodsTheRegistryPromises()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:hasALabel()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doubles()]	none
+#+[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doublesAgain()]	none
+#?[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:hasALabel()]	included	REACHES_CHANGE
+#?[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doubles()]	included	REACHES_CHANGE
+#?[engine:junit-jupiter]/[class:dev.demo.AlphaTest]/[method:doublesAgain()]	included	REACHES_CHANGE
+#?[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:hasALabel()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doubles()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.BetaTest]/[method:doublesAgain()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.DeltaShapeTest]/[method:exposesExactlyTheMethodsItsContractPromises()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]/[method:everyRegisteredTypeExposesTheMethodsTheRegistryPromises()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:hasALabel()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doubles()]	excluded	SKIPPED
+#?[engine:junit-jupiter]/[class:dev.demo.GammaTest]/[method:doublesAgain()]	excluded	SKIPPED
