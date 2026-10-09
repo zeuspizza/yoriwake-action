@@ -1,0 +1,8 @@
+# test	verdict	reason
+#!record-version	2
+#!rows	3
+#!writer	1 of 1
+#!outcome	selection-not-requested
+[engine:junit-jupiter]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]	included	SELECTION_NOT_REQUESTED
+[engine:junit-jupiter]/[class:dev.demo.EpsilonRegistryTest]/[method:everyRegisteredTypeExposesTheMethodsTheRegistryPromises()]	included	SELECTION_NOT_REQUESTED
