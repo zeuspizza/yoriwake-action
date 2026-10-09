@@ -142,6 +142,14 @@ class ChooseFlags(unittest.TestCase):
         self.assertEqual(choose("pull_request", pull_request(), job_total=3, key="jdk17").kind,
                          "select")
 
+    def test_a_matrix_job_without_a_key_saves_no_map_and_names_the_input(self):
+        for event, payload in (("push", push()), ("schedule", {})):
+            decision = choose(event, payload, job_total=2, isolated_capture=True)
+            self.assertEqual((decision.kind, decision.flags, decision.save),
+                             ("record", OFF, False), event)
+            self.assertIn("`key`", decision.warnings[0])
+            self.assertTrue(choose(event, payload, job_total=2, key="jdk17").save, event)
+
     def test_flags_the_action_owns_in_the_inputs_make_the_run_record(self):
         for tasks, gradle_args in (
             ("test", "-Pyoriwake.select"),

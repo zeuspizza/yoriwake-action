@@ -91,6 +91,14 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
     """The run kind, its Gradle flags, and whether the map may be saved, for one event."""
     capture = OFF + (["-Pyoriwake.isolatedCapture"] if isolated_capture else [])
 
+    def record(why):
+        return Decision("record", OFF, False, [f"{why}, so this run records every test"])
+
+    # Before the saving events too: a map one leg saved would be restored by the others.
+    if job_total > 1 and not key:
+        return record(f"this job is one of {job_total} in a matrix and the `key` input is empty, "
+                      "so its legs would share one map")
+
     if event == "schedule":
         return Decision("record", capture, True, [])
 
@@ -114,15 +122,9 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
             "The action selects on pull_request and saves on a push to the default branch "
             "or a schedule"])
 
-    def record(why):
-        return Decision("record", OFF, False, [f"{why}, so this run records every test"])
-
     named = owned_flags(tasks, gradle_args)
     if named:
         return record(f"the inputs name {' '.join(named)}; the action owns those flags")
-    if job_total > 1 and not key:
-        return record(f"this job is one of {job_total} in a matrix and the `key` input is empty, "
-                      "so its legs would share one map")
     base = pull_request_base(payload)
     if base is None:
         return record("the pull request's base branch could not be read from the event")

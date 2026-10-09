@@ -75,7 +75,7 @@ adding it.
 | `gradle-args` | | More arguments for Gradle, separated by spaces, without quoting. Naming yoriwake's `select`, `observe`, `complement`, `fullRun` or `base` here makes the run record every test: the action sets those. |
 | `observe` | `false` | On pull requests, run every test and report what selection would have left out, instead of selecting. Each task's `observation.json` is uploaded as an artifact named after the commit and job. |
 | `isolated-capture` | `false` | Record the map with a fresh test JVM per test class on the runs that save it. Slower to record, narrower to select. |
-| `key` | | Added to the cache key. Required in a matrix (`strategy.job-total` above 1): without it a matrix job records every test, since its legs would share one map. |
+| `key` | | Added to the cache key. Required in a matrix (`strategy.job-total` above 1): without it a matrix job records every test and saves no map, since its legs would share one map. |
 | `working-directory` | `.` | The directory holding `gradlew`. |
 | `map-dir` | `<working-directory>/.gradle/yoriwake` | The map directory to cache. Set it when the build uses `--project-cache-dir`. |
 | `default-branch` | the repository's | The branch whose pushes record and save the map. |
