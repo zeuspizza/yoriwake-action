@@ -20,6 +20,10 @@ import yoriwake_action as ya  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+# A run that does not select says so, so a `yoriwake.select` in the build's gradle.properties
+# or environment cannot make it select.
+OFF = ["-Pyoriwake.select=false", "-Pyoriwake.observe=false"]
+
 
 def choose(event, payload=None, **overrides):
     facts = dict(
@@ -53,18 +57,18 @@ def push(ref="refs/heads/main", default="main"):
 class ChooseFlags(unittest.TestCase):
     def test_a_push_to_the_default_branch_records_and_saves(self):
         decision = choose("push", push())
-        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", [], True))
+        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", OFF, True))
         self.assertEqual(decision.warnings, [])
 
     def test_a_recording_run_asks_for_isolated_capture_when_the_input_is_set(self):
         decision = choose("push", push(), isolated_capture=True)
-        self.assertEqual(decision.flags, ["-Pyoriwake.isolatedCapture"])
+        self.assertEqual(decision.flags, [*OFF, "-Pyoriwake.isolatedCapture"])
         self.assertTrue(decision.save)
 
     def test_a_schedule_records_and_saves(self):
         decision = choose("schedule", {"schedule": "0 3 * * *"}, isolated_capture=True)
         self.assertEqual((decision.kind, decision.flags, decision.save),
-                         ("record", ["-Pyoriwake.isolatedCapture"], True))
+                         ("record", [*OFF, "-Pyoriwake.isolatedCapture"], True))
 
     def test_the_default_branch_input_wins_over_the_payload(self):
         decision = choose("push", push(ref="refs/heads/trunk", default="main"),
@@ -73,7 +77,7 @@ class ChooseFlags(unittest.TestCase):
 
     def test_a_push_to_another_branch_records_saves_nothing_and_warns(self):
         decision = choose("push", push(ref="refs/heads/feature/x"))
-        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", [], False))
+        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", OFF, False))
         self.assertIn("refs/heads/feature/x", decision.warnings[0])
 
     def test_a_push_whose_default_branch_is_unknown_saves_nothing(self):
@@ -85,7 +89,8 @@ class ChooseFlags(unittest.TestCase):
         decision = choose("pull_request", pull_request(base="release/1.x"))
         self.assertEqual(decision.kind, "select")
         self.assertEqual(decision.flags,
-                         ["-Pyoriwake.select", "-Pyoriwake.base=origin/release/1.x"])
+                         ["-Pyoriwake.select", "-Pyoriwake.observe=false",
+                          "-Pyoriwake.base=origin/release/1.x"])
         self.assertFalse(decision.save)
         self.assertEqual(decision.warnings, [])
 
@@ -94,6 +99,7 @@ class ChooseFlags(unittest.TestCase):
         self.assertEqual(decision.kind, "observe")
         self.assertIn("-Pyoriwake.observe", decision.flags)
         self.assertNotIn("-Pyoriwake.select", decision.flags)
+        self.assertIn("-Pyoriwake.select=false", decision.flags)
         self.assertIn("-Pyoriwake.base=origin/main", decision.flags)
 
     def test_the_full_run_label_adds_the_full_run_flag(self):
@@ -113,25 +119,25 @@ class ChooseFlags(unittest.TestCase):
     def test_a_pull_request_without_a_restored_map_records_and_warns(self):
         decision = choose("pull_request", pull_request(labels=["yoriwake:full-run"]),
                           map_restored=False)
-        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", [], False))
+        self.assertEqual((decision.kind, decision.flags, decision.save), ("record", OFF, False))
         self.assertIn("no map", decision.warnings[0])
 
     def test_a_pull_request_whose_history_is_not_ready_records_and_warns(self):
         for ready in (False, None):
             decision = choose("pull_request", pull_request(), observe=True, history_ready=ready)
-            self.assertEqual((decision.kind, decision.flags), ("record", []))
+            self.assertEqual((decision.kind, decision.flags), ("record", OFF))
             self.assertIn("history", decision.warnings[0])
 
     def test_a_pull_request_without_a_base_records(self):
         for payload in ({}, {"pull_request": {"base": {}}}, pull_request(base="bad..name"),
                         pull_request(base="-x"), None):
             decision = choose("pull_request", payload)
-            self.assertEqual((decision.kind, decision.flags), ("record", []), payload)
+            self.assertEqual((decision.kind, decision.flags), ("record", OFF), payload)
             self.assertTrue(decision.warnings)
 
     def test_a_matrix_job_without_a_key_records_and_names_the_input(self):
         decision = choose("pull_request", pull_request(), job_total=3)
-        self.assertEqual((decision.kind, decision.flags), ("record", []))
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
         self.assertIn("`key`", decision.warnings[0])
         self.assertEqual(choose("pull_request", pull_request(), job_total=3, key="jdk17").kind,
                          "select")
@@ -146,7 +152,7 @@ class ChooseFlags(unittest.TestCase):
             ("test", "-Dorg.gradle.project.yoriwake.select=true"),
         ):
             decision = choose("pull_request", pull_request(), tasks=tasks, gradle_args=gradle_args)
-            self.assertEqual((decision.kind, decision.flags), ("record", []), gradle_args)
+            self.assertEqual((decision.kind, decision.flags), ("record", OFF), gradle_args)
             self.assertIn("owns", decision.warnings[0])
 
     def test_other_flags_in_the_inputs_change_nothing(self):
@@ -159,7 +165,7 @@ class ChooseFlags(unittest.TestCase):
                       "merge_group", "workflow_run"):
             decision = choose(event, push(), isolated_capture=True)
             self.assertEqual((decision.kind, decision.flags, decision.save),
-                             ("record", [], False), event)
+                             ("record", OFF, False), event)
             self.assertIn(event, decision.warnings[0])
 
     def test_the_default_branch_s_run_ignores_preconditions_of_selection(self):
@@ -531,7 +537,8 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs(), {
             "kind": "select",
-            "flags": "-Pyoriwake.select -Pyoriwake.base=origin/main -Pyoriwake.fullRun",
+            "flags": "-Pyoriwake.select -Pyoriwake.observe=false -Pyoriwake.base=origin/main "
+                     "-Pyoriwake.fullRun",
             "save": "false",
         })
 
@@ -554,7 +561,7 @@ class CommandLine(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs()["kind"], "record")
-        self.assertEqual(self.outputs()["flags"], "")
+        self.assertEqual(self.outputs()["flags"], " ".join(OFF))
         self.assertIn("::warning", result.stdout)
         self.assertTrue((self.state / "warnings").read_text().strip())
 
@@ -628,7 +635,7 @@ class GradleStepDropsOwnedFlags(unittest.TestCase):
     """Only the gradle step's bash keeps the user's yoriwake flags off the real Gradle command,
     and it must drop exactly what `owned_flags` names, or a run that records could select."""
 
-    CHOSEN = "-Pyoriwake.select -Pyoriwake.base=origin/main"
+    CHOSEN = "-Pyoriwake.select -Pyoriwake.observe=false -Pyoriwake.base=origin/main"
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -641,11 +648,11 @@ class GradleStepDropsOwnedFlags(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def gradle_argv(self, tasks, gradle_args):
+    def gradle_argv(self, tasks, gradle_args, outcome="success"):
         result = subprocess.run(
             ["bash", "-e", str(self.script)],
             env={"PATH": os.environ["PATH"], "STATE": "", "TASKS": tasks,
-                 "GRADLE_ARGS": gradle_args, "FLAGS_OUTCOME": "success", "FLAGS": self.CHOSEN},
+                 "GRADLE_ARGS": gradle_args, "FLAGS_OUTCOME": outcome, "FLAGS": self.CHOSEN},
             cwd=self.tmp, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -665,7 +672,12 @@ class GradleStepDropsOwnedFlags(unittest.TestCase):
             self.assertTrue(owned, gradle_args)
             kept = [arg for arg in f"{tasks} {gradle_args}".split()
                     if arg not in owned and arg not in ("-P", "--project-prop")]
-            self.assertEqual(self.gradle_argv(tasks, gradle_args), kept, gradle_args)
+            self.assertEqual(self.gradle_argv(tasks, gradle_args), [*kept, *OFF], gradle_args)
+
+    def test_flags_that_could_not_be_chosen_turn_selection_off(self):
+        for outcome in ("failure", "skipped", ""):
+            self.assertEqual(self.gradle_argv("test", "--info", outcome),
+                             ["test", "--info", *OFF], outcome)
 
     def test_near_misses_reach_gradle_with_the_chosen_flags(self):
         for gradle_args in ("-Pyoriwake.selectX", "-Pyoriwake.isolatedCapture",

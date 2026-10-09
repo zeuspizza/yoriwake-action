@@ -177,6 +177,8 @@ runs:
           if [ -n "$STATE" ]; then echo "$1" >> "$STATE/warnings"; fi
           echo "::warning title=yoriwake::$1"
         }
+        # Stated on the command line, which outranks gradle.properties and the environment.
+        OFF="-Pyoriwake.select=false -Pyoriwake.observe=false"
         set -f
         args=()
         dropped=""
@@ -199,10 +201,10 @@ runs:
         done
         if [ -n "$dropped" ]; then
           warn "left out of the Gradle command:$dropped. The action sets those flags itself; this run records every test"
-          FLAGS=""
+          FLAGS="$OFF"
         elif [ "$FLAGS_OUTCOME" != "success" ]; then
           warn "the flags could not be chosen, so this run records every test"
-          FLAGS=""
+          FLAGS="$OFF"
         fi
         echo "./gradlew ${args[*]} $FLAGS"
         # shellcheck disable=SC2086 # the flags are words to split; globbing is off

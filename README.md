@@ -44,9 +44,14 @@ from a map the plugin would refuse.
 
 | Event | Flags | Saves the map |
 |---|---|---|
-| `push` to the default branch, `schedule` | none: the run records every test (`-Pyoriwake.isolatedCapture` with `isolated-capture: true`) | yes, when HEAD is the commit the run was started for |
+| `push` to the default branch, `schedule` | selection off: the run records every test (`-Pyoriwake.isolatedCapture` with `isolated-capture: true`) | yes, when HEAD is the commit the run was started for |
 | `pull_request` | `-Pyoriwake.select -Pyoriwake.base=origin/<base>`, or `-Pyoriwake.observe -Pyoriwake.base=origin/<base>` with `observe: true`; `-Pyoriwake.fullRun` added when the pull request carries the `yoriwake:full-run` label | never |
-| any other (`pull_request_target`, `issue_comment`, `workflow_dispatch`, `merge_group`, pushes to other branches) | none: the run records every test | never, and a warning names the event |
+| any other (`pull_request_target`, `issue_comment`, `workflow_dispatch`, `merge_group`, pushes to other branches) | selection off: the run records every test | never, and a warning names the event |
+
+The action always states every mode flag on the command line (`-Pyoriwake.select=false
+-Pyoriwake.observe=false` when it records, the other one `=false` when it selects or observes), so
+a `yoriwake.select` in `gradle.properties` or the environment never turns its recording run into a
+selecting one.
 
 A pull request selects only when a map was restored and the history is ready: the merge base with
 the base branch resolves, and every restored map's capture commit is on the base branch. Otherwise

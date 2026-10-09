@@ -32,6 +32,10 @@ FULL_RUN_LABEL = "yoriwake:full-run"
 # same flags from the Gradle command in bash; change both together.
 OWNED_FLAG = re.compile(r"yoriwake\.(select|observe|complement|fullRun|base)(=|$)")
 
+# Every run states both mode flags on the command line, which outranks gradle.properties and the
+# environment: a `yoriwake.select` there would otherwise make a recording run select.
+OFF = ["-Pyoriwake.select=false", "-Pyoriwake.observe=false"]
+
 # Deepening steps for a shallow clone, after the base's own tip: commits from each tip, then all.
 DEPTHS = (1, 50, 500, None)
 
@@ -85,7 +89,7 @@ def owned_flags(tasks: str, gradle_args: str) -> list:
 def choose_flags(event, payload, *, observe, isolated_capture, default_branch, map_restored,
                  history_ready, job_total, key, tasks, gradle_args) -> Decision:
     """The run kind, its Gradle flags, and whether the map may be saved, for one event."""
-    capture = ["-Pyoriwake.isolatedCapture"] if isolated_capture else []
+    capture = OFF + (["-Pyoriwake.isolatedCapture"] if isolated_capture else [])
 
     if event == "schedule":
         return Decision("record", capture, True, [])
@@ -101,17 +105,17 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
             why = "the default branch is unknown (set the `default-branch` input)"
         else:
             why = f"{ref} is not the default branch {default}"
-        return Decision("record", [], False, [
+        return Decision("record", OFF, False, [
             f"a push to {ref}: {why}, so this run records and saves no map"])
 
     if event != "pull_request":
-        return Decision("record", [], False, [
+        return Decision("record", OFF, False, [
             f"the event {event or '(none)'} neither selects nor saves a map: this run records. "
             "The action selects on pull_request and saves on a push to the default branch "
             "or a schedule"])
 
     def record(why):
-        return Decision("record", [], False, [f"{why}, so this run records every test"])
+        return Decision("record", OFF, False, [f"{why}, so this run records every test"])
 
     named = owned_flags(tasks, gradle_args)
     if named:
@@ -128,8 +132,11 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
         return record(f"the history is not ready: no merge base with origin/{base}, or a "
                       "restored map's capture commit is not on it")
 
-    flags = ["-Pyoriwake.observe" if observe else "-Pyoriwake.select",
-             f"-Pyoriwake.base=origin/{base}"]
+    if observe:
+        flags = ["-Pyoriwake.observe", "-Pyoriwake.select=false"]
+    else:
+        flags = ["-Pyoriwake.select", "-Pyoriwake.observe=false"]
+    flags.append(f"-Pyoriwake.base=origin/{base}")
     if FULL_RUN_LABEL in labels(payload):
         flags.append("-Pyoriwake.fullRun")
     return Decision("observe" if observe else "select", flags, False, [])
