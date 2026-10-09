@@ -1,0 +1,324 @@
+name: test
+
+# Proves the action on real runners against the demo build in fixture/.
+#
+# Dispatched, one job per OS plays every event in turn. Its first run of the action records and
+# saves a map as a push to the default branch would; each later run starts from a reset fixture,
+# restores that map under an event payload `.github/selftest.py payload` wrote, and is checked.
+# The cache key holds the job's id, so the runs share one job to share one map. The branch
+# dispatched from stands in for the default branch: its tip is both the commit the map is
+# captured at and the pull requests' base. Every check reads the test results and the plugin's
+# decision records, not the log.
+#
+# A pull request runs the helper's tests and the action under the real pull_request event.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      plugin-ref:
+        description: >-
+          A zeuspizza/yoriwake commit to build the plugin from. Empty applies the released plugin
+          and skips the runs that need a later one (the full-run label and observe).
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  # Unique per run, so every run starts from an empty cache and the first run is a cold start.
+  KEY: run-${{ github.run_id }}-${{ github.run_attempt }}
+  BASE: ${{ github.ref_name }}
+
+jobs:
+  helper:
+    name: helper tests (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test_yoriwake_action.py
+
+  # The real event: a key no run has saved under misses, so the action must read the payload,
+  # find no map and record every test.
+  real-event:
+    if: github.event_name == 'pull_request'
+    name: real pull_request event (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - id: yoriwake
+        uses: ./
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}
+      - env:
+          ACTION_OUTCOME: ${{ steps.yoriwake.outcome }}
+          RUN_KIND: ${{ steps.yoriwake.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.yoriwake.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.yoriwake.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome success --kind record
+          --map-restored false --history-ready '' --ran all
+
+  plugin:
+    if: github.event_name == 'workflow_dispatch' && inputs.plugin-ref != ''
+    name: build the plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zeuspizza/yoriwake
+          ref: ${{ inputs.plugin-ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - run: ./gradlew :plugin:publishToMavenLocal -PreleaseVersion=0.0.0-test --console=plain
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin
+          path: ~/.m2/repository/io/github/zeuspizza
+          retention-days: 1
+
+  events:
+    needs: plugin
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.plugin.result != 'failure' }}
+    name: every event (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read # to list the cache entries the action saved
+    env:
+      LATER_PLUGIN: ${{ inputs.plugin-ref != '' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - if: env.LATER_PLUGIN == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin
+          path: ~/.m2/repository/io/github/zeuspizza
+      - if: env.LATER_PLUGIN == 'true'
+        run: echo "ORG_GRADLE_PROJECT_yoriwakeVersion=0.0.0-test" >> "$GITHUB_ENV"
+      - name: cache key prefix
+        env:
+          PREFIX: yoriwake-${{ runner.os }}-${{ github.workflow }}-${{ github.job }}-
+        run: echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+
+      # First push to the default branch, cold cache: records every test and saves the map.
+      # One test JVM per class while recording: the demo's classes otherwise share one JVM, and a
+      # change to one class would select every test that ran after it loaded.
+      - run: python3 .github/selftest.py payload push "$BASE" "$RUNNER_TEMP/push.json"
+      - id: record
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: push
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/push.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}
+          isolated-capture: true
+      - name: check the first push
+        env:
+          ACTION_OUTCOME: ${{ steps.record.outcome }}
+          RUN_KIND: ${{ steps.record.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.record.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.record.outputs.history-ready }}
+        run: |
+          python3 .github/selftest.py check --outcome success --kind record \
+            --map-restored false --history-ready '' --ran all
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-" --jq .total_count)
+          echo "cache entries under $PREFIX$KEY-: $count"
+          test "$count" -ge 1
+
+      # A pull request from a depth-1 checkout: restores the map, fetches the base, selects.
+      - if: ${{ !cancelled() }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py payload pull_request "$BASE" "$RUNNER_TEMP/pr.json"
+          python3 .github/selftest.py mutate
+      - id: select
+        if: ${{ !cancelled() }}
+        continue-on-error: true # the change breaks two tests
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}
+      - name: check the pull request selected, and ran every test the change breaks
+        if: ${{ !cancelled() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.select.outcome }}
+          RUN_KIND: ${{ steps.select.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.select.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.select.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran selected --broken
+
+      # The same pull request with the restore step failing: a key longer than the cache allows.
+      - id: long-key
+        if: ${{ !cancelled() }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+          echo "key=$(python3 -c 'print("k" * 600)')" >> "$GITHUB_OUTPUT"
+      - id: restore-fails
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ steps.long-key.outputs.key }}
+      - name: check a failed restore records every test
+        if: ${{ !cancelled() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.restore-fails.outcome }}
+          RUN_KIND: ${{ steps.restore-fails.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.restore-fails.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.restore-fails.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind record
+          --map-restored false --history-ready '' --ran all --broken
+
+      # The same pull request with a restore that succeeds and matches no key.
+      - if: ${{ !cancelled() }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: no-match
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-elsewhere
+      - name: check a cache miss records every test and saves nothing
+        if: ${{ !cancelled() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.no-match.outcome }}
+          RUN_KIND: ${{ steps.no-match.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.no-match.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.no-match.outputs.history-ready }}
+        run: |
+          python3 .github/selftest.py check --outcome failure --kind record \
+            --map-restored false --history-ready '' --ran all --broken
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-elsewhere-" --jq .total_count)
+          test "$count" -eq 0
+
+      # A pull_request_target payload: records, saves nothing. Its own key, so a save would show.
+      - if: ${{ !cancelled() }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py payload pull_request_target "$BASE" "$RUNNER_TEMP/prt.json"
+      - id: target
+        if: ${{ !cancelled() }}
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request_target
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/prt.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-target
+      - name: check pull_request_target records and saves nothing
+        if: ${{ !cancelled() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.target.outcome }}
+          RUN_KIND: ${{ steps.target.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.target.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.target.outputs.history-ready }}
+        run: |
+          python3 .github/selftest.py check --outcome success --kind record \
+            --map-restored false --history-ready '' --ran all
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-target-" --jq .total_count)
+          test "$count" -eq 0
+
+      # The full-run label: the plugin runs every test and names the request.
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py payload pull_request "$BASE" "$RUNNER_TEMP/label.json" yoriwake:full-run
+          python3 .github/selftest.py mutate
+      - id: label
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/label.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}
+      - name: check the label ran every test
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.label.outcome }}
+          RUN_KIND: ${{ steps.label.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.label.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.label.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran all --broken --decline full-run-requested
+
+      # observe: every test runs, and the observation says what selection would have left out.
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: observe
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}
+          observe: true
+      - name: check observe ran every test and reported
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.observe.outcome }}
+          RUN_KIND: ${{ steps.observe.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.observe.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.observe.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind observe
+          --map-restored true --history-ready true --ran all --broken --observed
