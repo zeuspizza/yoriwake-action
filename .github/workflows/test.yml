@@ -254,7 +254,9 @@ jobs:
           --map-restored true --history-ready true --ran all --broken --decline map-untrusted
 
   # A token without `actions: read`, as a fork's pull request can get: an entry planted from
-  # main's honest map is restored, the lookup is refused, and the run records with the warning.
+  # main's honest map is restored and the run must record every test. On a private repository
+  # the lookup is refused with the permission warning; this repository is public, so GitHub answers
+  # the lookup anyway, finds no digests for the planted entry's key, and the run records for that.
   no-actions-read:
     needs: plugin
     if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.plugin.result == 'success' }}
@@ -337,7 +339,7 @@ jobs:
           HISTORY_READY: ${{ steps.yoriwake.outputs.history-ready }}
         run: >-
           python3 pr/.github/selftest.py check --outcome failure --kind record
-          --map-restored true --history-ready true --ran all --broken --warning "actions: read"
+          --map-restored true --history-ready true --ran all --broken
 
   plugin:
     if: github.event_name != 'workflow_dispatch' || inputs.plugin-ref != ''
