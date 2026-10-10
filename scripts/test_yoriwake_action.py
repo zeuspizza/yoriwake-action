@@ -1077,6 +1077,13 @@ class CachedPaths(unittest.TestCase):
         ])
         self.assertEqual(self.paths(action_step("save")), restore)
 
+    def test_a_restored_selection_record_is_removed_before_the_run(self):
+        # The path list does not filter what a restore extracts, so an entry can still carry one.
+        step = action_step("clear")
+        at = next(i for i, line in enumerate(step) if line.strip().startswith("rm -f"))
+        end = next(i for i in range(at, len(step)) if not step[i].endswith("\\"))
+        self.assertIn('"$MAP_DIR"/*/selection.tsv', " ".join(step[at:end + 1]))
+
     def test_the_test_workflow_plants_entries_under_the_action_s_paths(self):
         lines = (Path(__file__).resolve().parent.parent / ".github" / "workflows"
                  / "test.yml").read_text().splitlines()

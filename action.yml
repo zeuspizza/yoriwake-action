@@ -139,7 +139,10 @@ runs:
         if [ "$MAP_RESTORED" != "true" ]; then
           rm -rf "$MAP_DIR"
         else
-          rm -f "$MAP_DIR"/*/decisions.tsv "$MAP_DIR"/*/decisions.tsv.*.part "$MAP_DIR"/*/observation.json
+          # selection.tsv only from the run that writes it: the cache path list does not stop an
+          # entry from carrying one.
+          rm -f "$MAP_DIR"/*/decisions.tsv "$MAP_DIR"/*/decisions.tsv.*.part "$MAP_DIR"/*/observation.json \
+            "$MAP_DIR"/*/selection.tsv
         fi
 
     - id: deepen
