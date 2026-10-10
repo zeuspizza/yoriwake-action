@@ -7,11 +7,26 @@ name: test
 # restores that map under an event payload `.github/selftest.py payload` wrote, and is checked.
 # The cache key holds the job's id, so the runs share one job to share one map. The branch
 # dispatched from stands in for the default branch: its tip is both the commit the map is
-# captured at and the pull requests' base. Every check reads the test results and the plugin's
-# decision records, not the log.
+# captured at and the pull requests' base, and the digests the first run uploads are the ones
+# its pull requests list. Every check reads the test results and the plugin's decision records,
+# not the log. The cache scope is the dispatched branch's throughout, so these runs show what the
+# action and the plugin do with a planted entry, not that GitHub scopes a pull request's own.
 #
 # A pull request runs the helper's tests and the action under the real pull_request event.
+#
+# Real events prove what a dispatched run cannot: the cache scopes GitHub gives a push to main
+# and a pull request, and the lookup against GitHub's own record of the runs. A push to main
+# records and uploads the digests (job `provenance`); each pull request then restores main's
+# entry and narrows (`honest`), restores an entry it planted in its own scope under main's key
+# and runs everything as map-untrusted (`shadow`), and, with a token lacking `actions: read` as a
+# fork's can, records with the permission warning (`no-actions-read`). These need a plugin that
+# writes map digests, built from PLUGIN_REF. A pull request opened before main has an entry warns
+# and proves nothing. A real fork pull request is the maintainer's one-time check (see the
+# README's "Its own tests"); this workflow does not open one.
 on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']
   workflow_dispatch:
@@ -19,7 +34,7 @@ on:
       plugin-ref:
         description: >-
           A zeuspizza/yoriwake commit to build the plugin from. Empty applies the released plugin
-          and skips the runs that need a later one (the full-run label and observe).
+          and skips the runs that need a later one (selection, the full-run label and observe).
         default: ''
 
 permissions:
@@ -31,6 +46,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # A zeuspizza/yoriwake commit that writes map digests, for the jobs on real events until a
+  # release does.
+  PLUGIN_REF: db8053a97c26c2dc4aff1916d1db9c540c1dd252
   # Unique per run, so every run starts from an empty cache and the first run is a cold start.
   KEY: run-${{ github.run_id }}-${{ github.run_attempt }}
   BASE: ${{ github.ref_name }}
@@ -80,15 +98,256 @@ jobs:
           python3 .github/selftest.py check --outcome success --kind record
           --map-restored false --history-ready '' --ran all
 
+  # One job id on both events, so a pull request's cache key prefix is the push's and it restores
+  # main's entry; the matrix keeps one entry, and one artifact, per case.
+  provenance:
+    needs: plugin
+    if: ${{ !cancelled() && github.event_name != 'workflow_dispatch' && needs.plugin.result == 'success' }}
+    name: map provenance on real events (${{ matrix.case }})
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [honest, shadow]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # the action's lookup, and the check that the push uploaded
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORG_GRADLE_PROJECT_yoriwakeVersion: 0.0.0-test
+    steps:
+      # The fixture at the pull request's base, so the change set is the mutation alone; the
+      # action under test, the pull request's, from pr/ (outside the Gradle build, so not a change).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin
+          path: ~/.m2/repository/io/github/zeuspizza
+      - name: cache key prefix
+        env:
+          OS: ${{ runner.os }}
+          WORKFLOW: ${{ github.workflow }}
+          CASE: ${{ matrix.case }}
+        run: |
+          prefix=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-" "$CASE" '')
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      # Until a push to main saves this case's entry there is nothing to restore. The push's own
+      # check fails when it saves or uploads nothing, so a pull request only says so and stops.
+      - id: main-entry
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ env.PREFIX }}none
+          restore-keys: ${{ env.PREFIX }}
+          lookup-only: true
+      - if: github.event_name == 'pull_request' && steps.main-entry.outputs.cache-matched-key == ''
+        run: echo "::warning title=provenance::no entry under $PREFIX on main yet, so this run proves nothing"
+
+      # A push to main records every test, saves the map and uploads its digests.
+      - id: record
+        if: github.event_name == 'push'
+        uses: ./pr
+        with:
+          working-directory: fixture
+          key: ${{ matrix.case }}
+          isolated-capture: true
+      - name: check the push recorded and uploaded the digests
+        if: github.event_name == 'push'
+        env:
+          ACTION_OUTCOME: ${{ steps.record.outcome }}
+          RUN_KIND: ${{ steps.record.outputs.run-kind }}
+        run: |
+          python3 pr/.github/selftest.py check --outcome success --kind record --ran all
+          name="yoriwake-maps-$(printf '%s' "$PREFIX$GITHUB_SHA" | sha256sum | cut -c1-32)"
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$name" --jq .total_count)
+          echo "artifacts named $name in this run: $count"
+          test "$count" -ge 1
+
+      # Honest: main's entry, vouched for by the push that saved it, narrows.
+      - if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+        run: python3 pr/.github/selftest.py mutate
+      - id: honest
+        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+        continue-on-error: true # the change breaks two tests
+        uses: ./pr
+        with:
+          working-directory: fixture
+          key: honest
+      - name: check the pull request narrowed from main's map
+        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+        env:
+          ACTION_OUTCOME: ${{ steps.honest.outcome }}
+          RUN_KIND: ${{ steps.honest.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.honest.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.honest.outputs.history-ready }}
+        run: >-
+          python3 pr/.github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran selected --broken
+
+      # Shadow: a crafted map saved in the pull request's own scope under main's key, as a
+      # reverted workflow edit can. Its scope is searched first, the lookup lists main's honest
+      # digests for that key, and the plugin refuses the crafted map.
+      - id: plant-source
+        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ env.PREFIX }}none
+          restore-keys: ${{ env.PREFIX }}
+      - id: plant
+        if: steps.plant-source.outputs.cache-matched-key != ''
+        run: |
+          cp -R fixture/.gradle/yoriwake "$RUNNER_TEMP/honest-map"
+          # A re-run restores the entry planted before, already crafted, which craft refuses.
+          if python3 pr/.github/selftest.py craft "$RUNNER_TEMP/honest-map"; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.plant.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ steps.plant-source.outputs.cache-matched-key }}
+      - if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        run: |
+          python3 pr/.github/selftest.py reset
+          python3 pr/.github/selftest.py mutate
+      - id: shadow
+        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        continue-on-error: true # the change breaks two tests
+        uses: ./pr
+        with:
+          working-directory: fixture
+          key: shadow
+      - name: check a planted entry under main's key runs every test as map-untrusted
+        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        env:
+          ACTION_OUTCOME: ${{ steps.shadow.outcome }}
+          RUN_KIND: ${{ steps.shadow.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.shadow.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.shadow.outputs.history-ready }}
+        run: >-
+          python3 pr/.github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran all --broken --decline map-untrusted
+
+  # A token without `actions: read`, as a fork's pull request can get: an entry planted from
+  # main's honest map is restored, the lookup is refused, and the run records with the warning.
+  no-actions-read:
+    needs: plugin
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.plugin.result == 'success' }}
+    name: lookup without actions read
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ORG_GRADLE_PROJECT_yoriwakeVersion: 0.0.0-test
+    steps:
+      # The fixture at the pull request's base, so the change set is the mutation alone; the
+      # action under test, the pull request's, from pr/ (outside the Gradle build, so not a change).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin
+          path: ~/.m2/repository/io/github/zeuspizza
+      - name: cache key prefixes
+        env:
+          OS: ${{ runner.os }}
+          WORKFLOW: ${{ github.workflow }}
+        run: |
+          source=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-provenance-" honest '')
+          prefix=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-" '' '')
+          echo "SOURCE=$source" >> "$GITHUB_ENV"
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+      - id: plant-source
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ env.SOURCE }}none
+          restore-keys: ${{ env.SOURCE }}
+      - id: plant
+        if: steps.plant-source.outputs.cache-matched-key != ''
+        env:
+          MATCHED: ${{ steps.plant-source.outputs.cache-matched-key }}
+        run: echo "key=$PREFIX${MATCHED##*-}" >> "$GITHUB_OUTPUT"
+      - if: steps.plant.outputs.key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ steps.plant.outputs.key }}
+      - if: steps.plant.outputs.key == ''
+        run: echo "::warning title=provenance::no entry under $SOURCE on main yet, so this run proves nothing"
+      - if: steps.plant.outputs.key != ''
+        run: |
+          python3 pr/.github/selftest.py reset
+          python3 pr/.github/selftest.py mutate
+      - id: yoriwake
+        if: steps.plant.outputs.key != ''
+        continue-on-error: true # the change breaks two tests
+        uses: ./pr
+        with:
+          working-directory: fixture
+      - name: check the refused lookup records every test and names the permission
+        if: steps.plant.outputs.key != ''
+        env:
+          ACTION_OUTCOME: ${{ steps.yoriwake.outcome }}
+          RUN_KIND: ${{ steps.yoriwake.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.yoriwake.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.yoriwake.outputs.history-ready }}
+        run: >-
+          python3 pr/.github/selftest.py check --outcome failure --kind record
+          --map-restored true --history-ready true --ran all --broken --warning "actions: read"
+
   plugin:
-    if: github.event_name == 'workflow_dispatch' && inputs.plugin-ref != ''
+    if: github.event_name != 'workflow_dispatch' || inputs.plugin-ref != ''
     name: build the plugin
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zeuspizza/yoriwake
-          ref: ${{ inputs.plugin-ref }}
+          ref: ${{ inputs.plugin-ref || env.PLUGIN_REF }}
           persist-credentials: false
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
@@ -113,7 +372,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      actions: read # to list the cache entries the action saved
+      actions: read # to list the cache entries the action saved and read the digests it uploaded
     env:
       LATER_PLUGIN: ${{ inputs.plugin-ref != '' }}
       GH_TOKEN: ${{ github.token }}
@@ -164,15 +423,17 @@ jobs:
           count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-" --jq .total_count)
           echo "cache entries under $PREFIX$KEY-: $count"
           test "$count" -ge 1
+          cp -R fixture/.gradle/yoriwake "$RUNNER_TEMP/honest-map"
 
       # A pull request from a depth-1 checkout: restores the map, fetches the base, selects.
+      # The released plugin writes no map digest, so nothing vouches for its map and it records.
       - if: ${{ !cancelled() }}
         run: |
           python3 .github/selftest.py reset
           python3 .github/selftest.py payload pull_request "$BASE" "$RUNNER_TEMP/pr.json"
           python3 .github/selftest.py mutate
       - id: select
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         continue-on-error: true # the change breaks two tests
         uses: ./
         env:
@@ -182,7 +443,7 @@ jobs:
           working-directory: fixture
           key: ${{ env.KEY }}
       - name: check the pull request selected, and ran every test the change breaks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         env:
           ACTION_OUTCOME: ${{ steps.select.outcome }}
           RUN_KIND: ${{ steps.select.outputs.run-kind }}
@@ -328,3 +589,97 @@ jobs:
         run: >-
           python3 .github/selftest.py check --outcome failure --kind observe
           --map-restored true --history-ready true --ran all --broken --observed
+
+      # A crafted map saved under the restore prefix, as a pull request's own run saves one through
+      # a workflow edit it then reverts. No run uploaded digests for that entry, so the list names
+      # nothing and the action records every test. Selected from without the list, this map skips
+      # both tests the change breaks.
+      - id: planted-key
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py craft "$RUNNER_TEMP/honest-map"
+          echo "key=$(python3 .github/selftest.py cache-key "$PREFIX" "$KEY-planted" crafted)" >> "$GITHUB_OUTPUT"
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ steps.planted-key.outputs.key }}
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: planted
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-planted
+      - name: check a planted map makes the run record every test
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.planted.outcome }}
+          RUN_KIND: ${{ steps.planted.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.planted.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.planted.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind record
+          --map-restored true --history-ready true --ran all --broken
+
+      # The crafted map under the exact key a run vouched for with the honest map's digests, as an
+      # entry shadowing the default branch's by its key would be: the list names the honest
+      # digest, the plugin recomputes the crafted map's, and runs every test as map-untrusted.
+      - id: shadowed-key
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py craft "$RUNNER_TEMP/honest-map"
+          key=$(python3 .github/selftest.py cache-key "$PREFIX" "$KEY-shadowed" "$GITHUB_SHA")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          YORIWAKE_STATE="$RUNNER_TEMP/vouch" YORIWAKE_MAP_DIR="$RUNNER_TEMP/honest-map" \
+            YORIWAKE_CACHE_KEY="$key" python3 scripts/yoriwake_action.py digests
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ steps.shadowed-key.outputs.key }}
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.shadowed-key.outputs.artifact-name }}
+          path: ${{ steps.shadowed-key.outputs.path }}
+          if-no-files-found: error
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: shadowed
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-shadowed
+      - name: check a map the list vouches for with another digest runs every test as map-untrusted
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.shadowed.outcome }}
+          RUN_KIND: ${{ steps.shadowed.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.shadowed.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.shadowed.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran all --broken --decline map-untrusted

@@ -4,14 +4,20 @@ The decision-record and observation fixtures under `fixtures/` were written by r
 plugin on its demo sample, so a change in what the plugin writes shows up here as a failing read.
 """
 
+import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.parse
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +29,9 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # A run that does not select says so, so a `yoriwake.select` in the build's gradle.properties
 # or environment cannot make it select.
 OFF = ["-Pyoriwake.select=false", "-Pyoriwake.observe=false"]
+
+LIST = "/tmp/state/trusted.tsv"
+TRUSTED = f"-Pyoriwake.trustedMaps={LIST}"
 
 
 def choose(event, payload=None, **overrides):
@@ -36,6 +45,9 @@ def choose(event, payload=None, **overrides):
         key="",
         tasks="test",
         gradle_args="",
+        trusted_list=LIST,
+        trusted_listed=True,
+        trusted_ok=True,
     )
     facts.update(overrides)
     return ya.choose_flags(event, payload, **facts)
@@ -90,9 +102,44 @@ class ChooseFlags(unittest.TestCase):
         self.assertEqual(decision.kind, "select")
         self.assertEqual(decision.flags,
                          ["-Pyoriwake.select", "-Pyoriwake.observe=false",
-                          "-Pyoriwake.base=origin/release/1.x"])
+                          "-Pyoriwake.base=origin/release/1.x", TRUSTED])
         self.assertFalse(decision.save)
         self.assertEqual(decision.warnings, [])
+
+    def test_a_pull_request_that_narrows_always_passes_the_trusted_list(self):
+        for observe, labels in ((False, ()), (True, ()), (False, ["yoriwake:full-run"])):
+            decision = choose("pull_request", pull_request(labels=labels), observe=observe)
+            self.assertIn(TRUSTED, decision.flags, (observe, labels))
+
+    def test_a_pull_request_without_a_trusted_list_file_records_and_warns(self):
+        decision = choose("pull_request", pull_request(), trusted_list="", trusted_listed=False)
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
+        self.assertIn("trusted-map list", decision.warnings[0])
+
+    def test_a_pull_request_whose_trusted_list_names_no_map_records_and_says_why(self):
+        # A plugin that ignores the list would otherwise narrow from whatever was restored.
+        for observe in (False, True):
+            decision = choose("pull_request", pull_request(), observe=observe,
+                              trusted_listed=False)
+            self.assertEqual((decision.kind, decision.flags), ("record", OFF), observe)
+            self.assertIn("vouched", decision.warnings[0])
+
+    def test_a_pull_request_whose_lookup_did_not_finish_records_whatever_the_list_holds(self):
+        # A restore can plant a list where the lookup writes it; only a finished lookup replaced it.
+        decision = choose("pull_request", pull_request(), trusted_ok=False)
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
+        self.assertIn("lookup", decision.warnings[0])
+
+    def test_a_pull_request_whose_trusted_list_path_holds_whitespace_records(self):
+        # A self-hosted runner's temp directory can hold a space; the flags are word-split.
+        decision = choose("pull_request", pull_request(), trusted_list="/runner one/trusted.tsv")
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
+        self.assertIn("whitespace", decision.warnings[0])
+
+    def test_a_recording_run_passes_no_trusted_list(self):
+        for event, payload in (("push", push()), ("schedule", {}), ("pull_request_target", push())):
+            self.assertFalse(any("trustedMaps" in flag for flag in choose(event, payload).flags),
+                             event)
 
     def test_a_pull_request_observes_instead_when_asked_and_never_both(self):
         decision = choose("pull_request", pull_request(), observe=True)
@@ -158,6 +205,8 @@ class ChooseFlags(unittest.TestCase):
             ("test", "--project-prop=yoriwake.fullRun"),
             ("test -Pyoriwake.complement", ""),
             ("test", "-Dorg.gradle.project.yoriwake.select=true"),
+            ("test", "-Pyoriwake.trustedMaps=/tmp/mine.tsv"),
+            ("test", "-P yoriwake.trustedMaps"),
         ):
             decision = choose("pull_request", pull_request(), tasks=tasks, gradle_args=gradle_args)
             self.assertEqual((decision.kind, decision.flags), ("record", OFF), gradle_args)
@@ -534,6 +583,7 @@ class CommandLine(unittest.TestCase):
         return str(path)
 
     def test_flags_reads_the_event_from_the_environment(self):
+        (self.state / "trusted.tsv").write_text(f"test-7f007aca\t{'ab' * 32}\n")
         result = self.run_helper("flags", {
             "GITHUB_EVENT_NAME": "pull_request",
             "GITHUB_EVENT_PATH": self.payload(pull_request(labels=["yoriwake:full-run"])),
@@ -541,12 +591,14 @@ class CommandLine(unittest.TestCase):
             "YORIWAKE_HISTORY_READY": "true",
             "YORIWAKE_JOB_TOTAL": "1",
             "YORIWAKE_TASKS": "test",
+            "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+            "YORIWAKE_TRUSTED_OUTCOME": "success",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs(), {
             "kind": "select",
             "flags": "-Pyoriwake.select -Pyoriwake.observe=false -Pyoriwake.base=origin/main "
-                     "-Pyoriwake.fullRun",
+                     f"-Pyoriwake.trustedMaps={self.state / 'trusted.tsv'} -Pyoriwake.fullRun",
             "save": "false",
         })
 
@@ -571,6 +623,41 @@ class CommandLine(unittest.TestCase):
             })
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.outputs()["save"], "false", real)
+
+    def test_flags_records_when_the_trusted_list_names_no_map(self):
+        for text in ("", "garbled line\n"):
+            self.out.write_text("")
+            (self.state / "trusted.tsv").write_text(text)
+            result = self.run_helper("flags", {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_EVENT_PATH": self.payload(pull_request()),
+                "YORIWAKE_MAP_RESTORED": "true",
+                "YORIWAKE_HISTORY_READY": "true",
+                "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+                "YORIWAKE_TRUSTED_OUTCOME": "success",
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.outputs()["kind"], "record", text)
+            self.assertEqual(self.outputs()["flags"], " ".join(OFF), text)
+
+    def test_flags_records_unless_the_lookup_step_succeeded(self):
+        (self.state / "trusted.tsv").write_text(f"test-7f007aca\t{'ab' * 32}\n")
+        for outcome in ("failure", "skipped", ""):
+            self.out.write_text("")
+            result = self.run_helper("flags", {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_EVENT_PATH": self.payload(pull_request()),
+                "YORIWAKE_MAP_RESTORED": "true",
+                "YORIWAKE_HISTORY_READY": "true",
+                "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+                "YORIWAKE_TRUSTED_OUTCOME": outcome,
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.outputs()["kind"], "record", outcome)
+
+    def test_the_flags_step_reads_the_lookup_step_s_outcome(self):
+        self.assertIn("        YORIWAKE_TRUSTED_OUTCOME: ${{ steps.trusted.outcome }}",
+                      action_step("flags"))
 
     def test_an_unreadable_payload_records_and_warns(self):
         result = self.run_helper("flags", {
@@ -637,6 +724,481 @@ class CommandLine(unittest.TestCase):
         self.assertIn("did not run", summary.read_text())
 
 
+REPO_ID = "4242"
+DEFAULT_SHA = "d" * 40
+KEY_SHA = "c" * 40
+KEY = "yoriwake-Linux-ci-test--map7-" + KEY_SHA
+NAME = "yoriwake-maps-" + hashlib.sha256(KEY.encode()).hexdigest()[:32]
+DIGEST = "ab" * 32
+
+
+def zipped(text, member="trusted.tsv"):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member, text)
+    return buffer.getvalue()
+
+
+class FakeGitHub:
+    """The REST endpoints `trusted` calls, with every request it received recorded.
+
+    An artifact's zip answers with a redirect to a storage URL on the same server, as GitHub
+    redirects to pre-signed storage.
+    """
+
+    def __init__(self):
+        self.artifacts = []
+        self.runs = {}
+        self.compare = {}  # head_sha -> status, compared against DEFAULT_SHA
+        self.zips = {}
+        self.status = {}  # path prefix -> status, or (status, message, headers), to answer instead
+        self.requests = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                fake.requests.append((self.path, self.headers.get("Authorization")))
+                for prefix, answer in fake.status.items():
+                    if self.path.startswith(prefix):
+                        code, message, headers = (answer if isinstance(answer, tuple)
+                                                  else (answer, "no", {}))
+                        return self.answer(code, {"message": message}, headers)
+                path, _, query = self.path.partition("?")
+                parts = path.strip("/").split("/")
+                asked = dict(urllib.parse.parse_qsl(query))
+                if path == "/repos/o/r/actions/runs":
+                    fields = {"branch": "head_branch", "event": "event", "head_sha": "head_sha"}
+                    runs = [run for run in fake.runs.values()
+                            if all(run[field] == asked[param]
+                                   for param, field in fields.items() if param in asked)]
+                    return self.answer(200, {"total_count": len(runs), "workflow_runs": runs})
+                if path.startswith("/repos/o/r/actions/runs/") and parts[-1] == "artifacts":
+                    found = [a for a in fake.artifacts if str(a["workflow_run"]["id"]) == parts[5]
+                             and a["name"] == asked.get("name", a["name"])]
+                    return self.answer(200, {"total_count": len(found), "artifacts": found})
+                if parts[:4] == ["repos", "o", "r", "actions"] and parts[4] == "runs":
+                    run = fake.runs.get(parts[5])
+                    return self.answer(200 if run else 404, run or {})
+                if path.startswith("/repos/o/r/git/ref/heads/"):
+                    return self.answer(200, {"object": {"sha": DEFAULT_SHA, "type": "commit"}})
+                if parts[:4] == ["repos", "o", "r", "compare"]:
+                    base, _, head = parts[4].partition("...")
+                    status = fake.compare.get(base) if head == DEFAULT_SHA else None
+                    return self.answer(200 if status else 404, {"status": status})
+                if parts[:4] == ["repos", "o", "r", "actions"] and parts[-1] == "zip":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{fake.port}/storage/{parts[5]}")
+                    self.end_headers()
+                    return None
+                if parts[0] == "storage" and parts[1] in fake.zips:
+                    body = fake.zips[parts[1]]
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return None
+                return self.answer(404, {})
+
+            def answer(self, code, data, headers=None):
+                body = json.dumps(data).encode()
+                self.send_response(code)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def upload(self, artifact_id, *, event="push", branch="main", repo_id=REPO_ID, sha=None,
+               created="2026-10-01T00:00:00Z", text=f"test-7f007aca\t{DIGEST}\n", status=None,
+               name=NAME):
+        """An artifact of its own run of the given event, branch and repository, at the restored
+        key's commit unless `sha` names another; newest added last."""
+        sha = sha or KEY_SHA
+        run_id = str(9000 + artifact_id)
+        self.artifacts.insert(0, {
+            "id": artifact_id, "name": name, "expired": False, "created_at": created,
+            "workflow_run": {"id": int(run_id), "repository_id": int(REPO_ID),
+                             "head_repository_id": int(repo_id), "head_branch": branch,
+                             "head_sha": sha},
+        })
+        self.runs[run_id] = {"id": int(run_id), "event": event, "head_branch": branch,
+                             "head_sha": sha, "head_repository_id": int(repo_id),
+                             "created_at": created}
+        self.compare[sha] = status or "ahead"
+        self.zips[str(artifact_id)] = zipped(text) if isinstance(text, str) else text
+
+    def paths(self, fragment):
+        return [path for path, _ in self.requests if fragment in path]
+
+
+class Trusted(unittest.TestCase):
+    """The trusted-map list a pull request passes, from GitHub's own record of who uploaded it."""
+
+    def setUp(self):
+        self.github = FakeGitHub()
+        self.addCleanup(self.github.close)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.list = self.tmp / "trusted.tsv"
+        self.list.write_text("left over\tfrom before\n")
+        self.out = self.tmp / "output"
+        self.out.write_text("")
+
+    def trusted(self, event="pull_request", payload=None, matched_key=KEY, **env):
+        events = self.tmp / "event.json"
+        events.write_text(json.dumps(payload if payload is not None else {
+            "pull_request": {"base": {"ref": "main"}},
+            "repository": {"default_branch": "main", "id": int(REPO_ID)},
+        }))
+        full = {
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(self.out),
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_EVENT_PATH": str(events),
+            "GITHUB_API_URL": f"http://127.0.0.1:{self.github.port}",
+            "GITHUB_REPOSITORY": "o/r",
+            "GITHUB_REPOSITORY_ID": REPO_ID,
+            "GITHUB_RUN_ID": "1",
+            "GITHUB_REF_NAME": "refs/pull/7/merge",
+            "YORIWAKE_STATE": str(self.tmp),
+            "YORIWAKE_TRUSTED_LIST": str(self.list),
+            "YORIWAKE_MATCHED_KEY": matched_key,
+            "YORIWAKE_TOKEN": "secret-token",
+            **env,
+        }
+        result = subprocess.run([sys.executable, str(Path(ya.__file__)), "trusted"], env=full,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def listed(self):
+        return self.list.read_text()
+
+    def test_a_default_branch_push_s_artifact_is_the_list(self):
+        self.github.upload(1)
+        self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+
+    def test_a_pull_request_run_s_artifact_of_the_same_name_is_skipped(self):
+        self.github.upload(1, event="pull_request")
+        out = self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertIn("::warning", out)
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_fork_s_branch_named_like_the_default_is_filtered_without_asking_for_its_files(self):
+        self.github.upload(1, repo_id="777")
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/artifacts"), [])
+
+    def test_a_tag_named_like_the_default_branch_at_a_commit_off_it_is_skipped(self):
+        self.github.upload(1, status="diverged")
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(len(self.github.paths("/compare/")), 1)
+
+    def test_a_push_at_a_commit_the_default_branch_does_not_contain_is_skipped(self):
+        self.github.upload(1, status="behind")
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+
+    def test_a_commit_the_default_branch_points_at_is_contained(self):
+        self.github.upload(1, status="identical")
+        self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+
+    def test_the_default_branch_is_compared_by_its_commit_never_by_a_name_a_tag_could_share(self):
+        self.github.upload(1)
+        self.trusted()
+        self.assertEqual(self.github.paths("/compare/"),
+                         [f"/repos/o/r/compare/{KEY_SHA}...{DEFAULT_SHA}?per_page=1"])
+
+    def test_an_artifact_that_names_another_commit_than_its_run_is_not_downloaded(self):
+        self.github.upload(1)
+        self.github.artifacts[0]["workflow_run"]["head_sha"] = "e" * 40
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_run_at_another_commit_than_the_restored_key_s_is_not_asked_for_its_files(self):
+        self.github.upload(1, sha="e" * 40)
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/artifacts"), [])
+
+    def test_the_runs_are_found_by_branch_event_and_the_restored_key_s_commit(self):
+        self.github.upload(1)
+        self.trusted()
+        self.assertEqual(self.github.paths("/actions/runs?"), [
+            f"/repos/o/r/actions/runs?branch=main&event={event}&head_sha={KEY_SHA}&per_page=100"
+            for event in ("push", "schedule")])
+
+    def test_a_schedule_run_s_artifact_is_the_list(self):
+        self.github.upload(1, event="schedule")
+        self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+
+    def test_an_expired_artifact_is_not_downloaded(self):
+        self.github.upload(1)
+        self.github.artifacts[0]["expired"] = True
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_key_that_names_no_commit_asks_nothing(self):
+        self.github.upload(1)
+        out = self.trusted(matched_key=KEY[:-40] + "crafted")
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.requests, [])
+        self.assertIn("::warning", out)
+
+    def test_a_failing_compare_skips_that_candidate(self):
+        self.github.upload(1)
+        self.github.status["/repos/o/r/compare/"] = 500
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+
+    def test_a_dispatched_run_s_artifact_is_skipped_on_a_pull_request(self):
+        self.github.upload(1, event="workflow_dispatch")
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+
+    def test_the_newest_trusted_candidate_wins_over_newer_untrusted_ones(self):
+        self.github.upload(1, created="2026-10-01T00:00:00Z", text=f"older\t{DIGEST}\n")
+        self.github.upload(2, created="2026-10-02T00:00:00Z", text=f"newest\t{'cd' * 32}\n")
+        self.github.upload(3, event="pull_request", created="2026-10-03T00:00:00Z")
+        self.github.upload(4, repo_id="777", created="2026-10-04T00:00:00Z")
+        self.trusted()
+        self.assertEqual(self.listed(), f"newest\t{'cd' * 32}\n")
+
+    def test_uploads_under_the_trusted_name_by_other_runs_cannot_hide_the_trusted_one(self):
+        self.github.upload(1, created="2026-09-01T00:00:00Z")
+        for n in range(2, 152):
+            self.github.upload(n, event="pull_request", repo_id="777",
+                               created=f"2026-10-01T00:00:{n % 60:02d}Z")
+        self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+        self.assertEqual(self.github.paths("/artifacts?"),
+                         [f"/repos/o/r/actions/runs/9001/artifacts?name={NAME}&per_page=100"])
+
+    def test_runs_without_the_artifact_are_looked_at_up_to_the_cap(self):
+        for n in range(1, 9):
+            self.github.upload(n, name="something-else", created=f"2026-10-01T00:00:0{n}Z")
+        out = self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(len(self.github.paths("/artifacts?")), ya.LOOKUP_CAP)
+        self.assertEqual(len(self.github.paths("/compare/")), 1)
+        self.assertIn(f"stopped after {ya.LOOKUP_CAP} of 8", out)
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_token_without_actions_read_leaves_the_list_empty_and_names_the_permission(self):
+        self.github.upload(1)
+        self.github.status["/repos/o/r/actions/runs"] = 403
+        out = self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertIn("actions: read", out)
+
+    def test_a_rate_limit_is_named_as_one_not_as_a_missing_permission(self):
+        for answer in ((403, "API rate limit exceeded", {"x-ratelimit-remaining": "0"}),
+                       (403, "You have exceeded a secondary rate limit.", {}),
+                       (429, "Too many requests", {})):
+            self.github.status["/repos/o/r/actions/"] = answer
+            out = self.trusted()
+            self.assertEqual(self.listed(), "", answer)
+            self.assertIn("rate limit", out, answer)
+            self.assertNotIn("actions: read", out, answer)
+
+    def test_no_artifact_leaves_the_list_empty_and_warns(self):
+        out = self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertIn("::warning", out)
+
+    def test_no_matched_key_leaves_the_list_empty_without_a_request(self):
+        self.github.upload(1)
+        self.trusted(matched_key="")
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.requests, [])
+
+    def test_an_artifact_named_for_another_key_is_not_this_entry_s(self):
+        self.github.upload(1)
+        self.trusted(matched_key=KEY.replace("-test-", "-other-"))
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_malformed_zip_leaves_the_list_empty(self):
+        self.github.upload(1, text=b"not a zip at all")
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+
+    def test_malformed_lines_in_the_artifact_are_dropped(self):
+        self.github.upload(1, text=f"good\t{DIGEST}\nbad\tnot-hex\n\tno-name\nextra\t{DIGEST}\tx\n")
+        self.trusted()
+        self.assertEqual(self.listed(), f"good\t{DIGEST}\n")
+
+    def test_the_token_goes_to_the_api_and_never_to_the_storage_redirect(self):
+        self.github.upload(1)
+        self.trusted()
+        sent = dict(self.github.requests)
+        self.assertEqual(sent["/repos/o/r/actions/artifacts/1/zip"], "Bearer secret-token")
+        self.assertIsNone(sent["/storage/1"])
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+
+    def test_an_event_other_than_a_pull_request_writes_an_empty_list_and_asks_nothing(self):
+        self.github.upload(1)
+        self.trusted(event="push", payload={"ref": "refs/heads/main"})
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.requests, [])
+
+    def test_the_default_branch_input_names_the_trusted_branch(self):
+        self.github.upload(1, branch="trunk")
+        self.github.upload(2, branch="main", created="2026-10-02T00:00:00Z")
+        self.trusted(YORIWAKE_DEFAULT_BRANCH="trunk")
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+        self.assertEqual(self.github.paths("/git/ref/"), ["/repos/o/r/git/ref/heads/trunk"])
+        self.assertEqual(self.github.paths("/zip"), ["/repos/o/r/actions/artifacts/1/zip"])
+
+    def test_a_dispatched_test_trusts_only_its_own_run_s_upload(self):
+        self.github.upload(1, event="workflow_dispatch", created="2026-10-01T00:00:00Z",
+                           text=f"own\t{DIGEST}\n")
+        self.github.upload(2, event="workflow_dispatch", created="2026-10-02T00:00:00Z")
+        self.github.upload(3, event="push", created="2026-10-03T00:00:00Z")
+        self.trusted(event="workflow_dispatch", GITHUB_RUN_ID="9001", GITHUB_REF_NAME="main",
+                     YORIWAKE_EVENT_NAME="pull_request")
+        self.assertEqual(self.listed(), f"own\t{DIGEST}\n")
+
+
+class Digests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.maps = self.tmp / "maps"
+        self.out = self.tmp / "output"
+        self.out.write_text("")
+
+    def digests(self, key=KEY):
+        result = subprocess.run(
+            [sys.executable, str(Path(ya.__file__)), "digests"],
+            env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(self.out),
+                 "YORIWAKE_STATE": str(self.tmp / "state"), "YORIWAKE_MAP_DIR": str(self.maps),
+                 "YORIWAKE_CACHE_KEY": key},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return dict(line.split("=", 1) for line in self.out.read_text().splitlines() if line)
+
+    def test_every_map_s_digest_is_staged_under_the_name_the_key_gives(self):
+        place(self.maps, "test-7f007aca", {"map-digest": f"sha256 {DIGEST}\n"})
+        place(self.maps, "integrationTest-0badf00d", {"map-digest": f"sha256 {'cd' * 32}\n"})
+        place(self.maps, "unfinished-11111111", {"coverage.tsv": ""})
+        place(self.maps, "garbled-22222222", {"map-digest": "md5 abc\n"})
+        outputs = self.digests()
+        self.assertEqual(outputs["artifact-name"], NAME)
+        self.assertEqual(outputs["count"], "2")
+        self.assertEqual((Path(outputs["path"]) / "trusted.tsv").read_text(),
+                         f"integrationTest-0badf00d\t{'cd' * 32}\ntest-7f007aca\t{DIGEST}\n")
+
+    def test_no_digest_stages_nothing(self):
+        place(self.maps, "test-7f007aca", {"coverage.tsv": ""})
+        self.assertEqual(self.digests()["count"], "0")
+
+    def test_what_digests_stages_is_what_trusted_reads(self):
+        place(self.maps, "test-7f007aca", {"map-digest": f"sha256 {DIGEST}\n"})
+        staged = (Path(self.digests()["path"]) / "trusted.tsv").read_text()
+        self.assertEqual(ya.parse_trusted_list(staged), [f"test-7f007aca\t{DIGEST}"])
+
+
+def action_step(step_id):
+    """One step of action.yml, as its lines, from `- id: <step_id>` to the next step."""
+    lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
+    start = lines.index(f"    - id: {step_id}")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("    - ")),
+               len(lines))
+    return lines[start:end]
+
+
+class UploadConditions(unittest.TestCase):
+    """The digests are uploaded exactly when the save wrote an entry: never on an exact-key hit,
+    whose save writes nothing, and also when the tests failed."""
+
+    def condition(self, step_id):
+        return next(line for line in action_step(step_id) if line.strip().startswith("if:"))
+
+    def test_the_digests_follow_a_save_that_wrote(self):
+        condition = self.condition("digests")
+        self.assertIn("!cancelled()", condition)
+        self.assertIn("steps.save.outcome == 'success'", condition)
+        self.assertIn("steps.restore.outputs.cache-hit != 'true'", condition)
+        self.assertNotIn("success()", condition)
+
+    def test_the_save_follows_the_head_check(self):
+        self.assertIn("steps.save-check.outputs.save == 'true'", self.condition("save"))
+
+    def test_the_upload_never_overwrites(self):
+        upload = action_step("upload-digests")
+        self.assertIn("steps.digests.outputs.count", self.condition("upload-digests"))
+        self.assertFalse(any("overwrite" in line for line in upload))
+        self.assertTrue(any("continue-on-error: true" in line for line in upload))
+
+    def test_the_upload_keeps_the_digests_for_the_retention_days_input(self):
+        self.assertIn("        retention-days: ${{ inputs.retention-days }}",
+                      action_step("upload-digests"))
+        lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
+        at = lines.index("  retention-days:")
+        default = next(line for line in lines[at:] if line.strip().startswith("default:"))
+        self.assertEqual(default.strip(), "default: '90'")
+
+
+class CachedPaths(unittest.TestCase):
+    """What the cache holds. `selection.tsv` leaves tests out of a complement run and no digest
+    covers it, so it never comes from a cache; restore and save name the same paths, or a saved
+    entry is never restored."""
+
+    @staticmethod
+    def paths(lines):
+        start = next(i for i, line in enumerate(lines) if line.strip() == "path: |") + 1
+        return [line.strip() for line in lines[start:start + 3]]
+
+    def test_restore_and_save_leave_out_raw_records_and_the_selection_record(self):
+        restore = self.paths(action_step("restore"))
+        self.assertEqual(restore, [
+            "${{ steps.setup.outputs.map-dir }}",
+            "!${{ steps.setup.outputs.map-dir }}/*/raw",
+            "!${{ steps.setup.outputs.map-dir }}/*/selection.tsv",
+        ])
+        self.assertEqual(self.paths(action_step("save")), restore)
+
+    def test_a_restored_selection_record_is_removed_before_the_run(self):
+        # The path list does not filter what a restore extracts, so an entry can still carry one.
+        step = action_step("clear")
+        at = next(i for i, line in enumerate(step) if line.strip().startswith("rm -f"))
+        end = next(i for i in range(at, len(step)) if not step[i].endswith("\\"))
+        self.assertIn('"$MAP_DIR"/*/selection.tsv', " ".join(step[at:end + 1]))
+
+    def test_the_test_workflow_plants_entries_under_the_action_s_paths(self):
+        lines = (Path(__file__).resolve().parent.parent / ".github" / "workflows"
+                 / "test.yml").read_text().splitlines()
+        saves = [i for i, line in enumerate(lines) if "actions/cache/save@" in line]
+        self.assertTrue(saves)
+        for at in saves:
+            self.assertEqual(self.paths(lines[at:]), [
+                "fixture/.gradle/yoriwake",
+                "!fixture/.gradle/yoriwake/*/raw",
+                "!fixture/.gradle/yoriwake/*/selection.tsv",
+            ])
+
+
 def gradle_step_script():
     """The `run` block of action.yml's gradle step, as bash receives it."""
     lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
@@ -687,6 +1249,8 @@ class GradleStepDropsOwnedFlags(unittest.TestCase):
             ("test", "--project-prop=yoriwake.fullRun"),
             ("test -Pyoriwake.complement", ""),
             ("test", "-Dorg.gradle.project.yoriwake.select=true"),
+            ("test", "-Pyoriwake.trustedMaps=/tmp/mine.tsv"),
+            ("test", "--project-prop yoriwake.trustedMaps=/tmp/mine.tsv"),
         ):
             owned = ya.owned_flags(tasks, gradle_args)
             self.assertTrue(owned, gradle_args)

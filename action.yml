@@ -39,6 +39,16 @@ inputs:
     description: >-
       The branch whose pushes record and save the map. Defaults to the repository's default branch.
     default: ''
+  retention-days:
+    description: >-
+      Days the default branch's map digests stay readable. A pull request restoring an entry whose
+      digests expired records every test. GitHub caps it at the repository's retention limit.
+    default: '90'
+  github-token:
+    description: >-
+      Reads the digests the default branch's runs uploaded, on pull requests. Needs
+      `actions: read`.
+    default: ${{ github.token }}
 
 outputs:
   run-kind:
@@ -80,6 +90,9 @@ runs:
         mkdir -p "$state"
         echo "state=$state" >> "$GITHUB_OUTPUT"
         echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+        # Empty until a run of the default branch is found to vouch for the restored maps.
+        : > "$state/trusted.tsv"
+        echo "trusted-list=$state/trusted.tsv" >> "$GITHUB_OUTPUT"
 
         python=""
         for candidate in python3 python; do
@@ -114,6 +127,7 @@ runs:
         path: |
           ${{ steps.setup.outputs.map-dir }}
           !${{ steps.setup.outputs.map-dir }}/*/raw
+          !${{ steps.setup.outputs.map-dir }}/*/selection.tsv
         key: ${{ steps.setup.outputs.key }}
         restore-keys: ${{ steps.setup.outputs.restore-prefix }}
 
@@ -130,7 +144,10 @@ runs:
         if [ "$MAP_RESTORED" != "true" ]; then
           rm -rf "$MAP_DIR"
         else
-          rm -f "$MAP_DIR"/*/decisions.tsv "$MAP_DIR"/*/decisions.tsv.*.part "$MAP_DIR"/*/observation.json
+          # selection.tsv only from the run that writes it: the cache path list does not stop an
+          # entry from carrying one.
+          rm -f "$MAP_DIR"/*/decisions.tsv "$MAP_DIR"/*/decisions.tsv.*.part "$MAP_DIR"/*/observation.json \
+            "$MAP_DIR"/*/selection.tsv
         fi
 
     - id: deepen
@@ -144,6 +161,21 @@ runs:
         YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
         YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
       run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" deepen'
+
+    # The list a selecting run narrows by: the digests a run of the default branch uploaded for
+    # the restored entry, looked up through GitHub's record of that run, never read from the cache.
+    - id: trusted
+      if: steps.setup.outputs.python != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_TRUSTED_LIST: ${{ steps.setup.outputs.trusted-list }}
+        YORIWAKE_MATCHED_KEY: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key || '' }}
+        YORIWAKE_DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        YORIWAKE_TOKEN: ${{ inputs.github-token }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" trusted'
 
     - id: flags
       if: steps.setup.outputs.python != ''
@@ -161,6 +193,8 @@ runs:
         YORIWAKE_KEY: ${{ inputs.key }}
         YORIWAKE_TASKS: ${{ inputs.tasks }}
         YORIWAKE_GRADLE_ARGS: ${{ inputs.gradle-args }}
+        YORIWAKE_TRUSTED_LIST: ${{ steps.setup.outputs.trusted-list }}
+        YORIWAKE_TRUSTED_OUTCOME: ${{ steps.trusted.outcome }}
       run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" flags'
 
     - id: gradle
@@ -188,7 +222,7 @@ runs:
           case "$arg" in
             *yoriwake.select | *yoriwake.select=* | *yoriwake.observe | *yoriwake.observe=* \
             | *yoriwake.complement | *yoriwake.complement=* | *yoriwake.fullRun | *yoriwake.fullRun=* \
-            | *yoriwake.base | *yoriwake.base=*)
+            | *yoriwake.base | *yoriwake.base=* | *yoriwake.trustedMaps | *yoriwake.trustedMaps=*)
               dropped="$dropped $arg"
               last=$(( ${#args[@]} - 1 ))
               if [ "$last" -ge 0 ] && { [ "${args[$last]}" = "-P" ] || [ "${args[$last]}" = "--project-prop" ]; }; then
@@ -244,11 +278,36 @@ runs:
           echo "::warning title=yoriwake::HEAD is $head, not the commit this run was started for ($GITHUB_SHA), so the map is not saved"
         fi
 
-    - if: ${{ !cancelled() && steps.save-check.outputs.save == 'true' }}
+    - id: save
+      if: ${{ !cancelled() && steps.save-check.outputs.save == 'true' }}
       continue-on-error: true
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ steps.setup.outputs.map-dir }}
           !${{ steps.setup.outputs.map-dir }}/*/raw
+          !${{ steps.setup.outputs.map-dir }}/*/selection.tsv
         key: ${{ steps.setup.outputs.key }}
+
+    # The digests of what the save wrote, for pull requests to list. An exact-key hit saves
+    # nothing, so it uploads nothing: the entry already holds an earlier run's maps.
+    - id: digests
+      if: ${{ !cancelled() && steps.save.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+        YORIWAKE_CACHE_KEY: ${{ steps.setup.outputs.key }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" digests'
+
+    - id: upload-digests
+      if: ${{ !cancelled() && steps.digests.outputs.count != '' && steps.digests.outputs.count != '0' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.digests.outputs.artifact-name }}
+        path: ${{ steps.digests.outputs.path }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
