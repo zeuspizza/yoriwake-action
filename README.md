@@ -90,8 +90,9 @@ longer shows. A crafted map can make a run skip almost every test. So:
   whose digest the list names, and runs every test as `map-unverified` (not listed) or
   `map-untrusted` (listed with another digest); the job summary names which.
 
-This needs `actions: read` on the job's token, as in the example. A fork's pull request gets what
-its workflow grants, read-only.
+On a private repository this needs `actions: read` on the job's token, as in the example; a
+public repository's runs and artifacts are readable without it. A fork's pull request gets what its
+workflow grants, read-only. Without a readable lookup the run records every test.
 
 What it cannot cover:
 
@@ -223,12 +224,12 @@ tag, since `actions/checkout` reads a short SHA as a branch name.
 
 On a push to `main` and on every pull request it also runs the action on the real events: the
 push records and uploads the digests, and each pull request then narrows from `main`'s entry,
-runs everything when it restores a crafted entry it planted under `main`'s key, and records with
-the permission warning when its token lacks `actions: read`. A pull request before `main` has an
+runs everything when it restores a crafted entry it planted under `main`'s key, and records every
+test when its token lacks `actions: read` (with the permission warning on a private repository). A pull request before `main` has an
 entry warns and proves nothing. The jobs build the plugin from `PLUGIN_REF` in that workflow
 until a release writes map digests.
 
 Maintainer's one-time check, which no workflow can open for itself: a pull request from a fork.
 Its run gets a fork's read-only token and runs the same jobs; they should end as on a pull request
 from a branch: `honest` narrows (the read-only token reads the digests), `shadow` runs every test
-as `map-untrusted`, and `no-actions-read` records with the warning naming `actions: read`.
+as `map-untrusted`, and `no-actions-read` records every test.
