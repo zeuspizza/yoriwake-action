@@ -58,8 +58,8 @@ DIGEST_LINE = re.compile(r"sha256 ([0-9a-f]{64})")
 SHA = re.compile(r"[0-9a-f]{40}")
 # Events whose runs ran the default branch's own workflow and code.
 TRUSTED_EVENTS = ("push", "schedule")
-# Candidates looked at beyond the listing: anyone can upload under the name, so the requests a
-# lookup makes are bounded whatever was uploaded.
+# Runs asked for their artifacts: the runs at one commit are few, and the requests a lookup makes
+# stay bounded whatever runs exist.
 LOOKUP_CAP = 5
 MAX_LIST_BYTES = 1 << 20
 
@@ -347,53 +347,75 @@ class GitHub:
         return body
 
 
-def find_trusted(github: GitHub, *, name: str, branch: str, repo_id: str, events,
+def key_commit(key: str):
+    """The commit the cache key names: the action ends every key with the saving run's commit."""
+    commit = key.rsplit("-", 1)[-1]
+    return commit if SHA.fullmatch(commit) else None
+
+
+def find_trusted(github: GitHub, *, name: str, branch: str, repo_id: str, events, head_sha: str,
                  run_id: str | None = None):
     """The newest artifact named `name` that a run of `events` on `branch` of this repository
-    uploaded at a commit `branch` contains, or None, and why each candidate was passed over.
+    uploaded at `head_sha`, a commit `branch` contains, or None, and why candidates were passed
+    over.
 
-    Candidates are filtered on the listing's own fields before any further request, and at
-    most LOOKUP_CAP of the rest are looked at.
+    The runs are found by the commit, so artifacts anyone else uploads under the name never
+    crowd them out; at most LOOKUP_CAP of them are asked for their artifacts.
     """
     notes = []
-    listing = github.json(f"actions/artifacts?name={urllib.parse.quote(name)}&per_page=100")
+    if run_id is not None:
+        runs = [github.json(f"actions/runs/{int(run_id)}")]
+    else:
+        runs = []
+        for wanted_event in events:
+            listing = github.json(
+                f"actions/runs?branch={urllib.parse.quote(branch, safe='')}&event={wanted_event}"
+                f"&head_sha={head_sha}&per_page=100")
+            runs += listing.get("workflow_runs") or []
     candidates = []
-    for artifact in listing.get("artifacts") or []:
-        run = artifact.get("workflow_run") or {}
-        if (artifact.get("name") == name and artifact.get("expired") is False
-                and run.get("head_branch") == branch
-                and str(run.get("head_repository_id")) == repo_id
-                and SHA.fullmatch(str(run.get("head_sha")))):
-            candidates.append(artifact)
-    candidates.sort(key=lambda a: (str(a.get("created_at")), int(a.get("id") or 0)), reverse=True)
-    branch_sha = None
-    for artifact in candidates[:LOOKUP_CAP]:
-        uploaded = artifact["workflow_run"]
-        run = github.json(f"actions/runs/{int(uploaded['id'])}")
-        if run.get("event") not in events or (run_id is not None and str(run.get("id")) != run_id):
-            notes.append(f"artifact {artifact.get('id')}: uploaded by a {run.get('event')} run")
+    for run in runs:
+        if not isinstance(run, dict):
             continue
-        if run.get("head_sha") != uploaded["head_sha"]:
-            notes.append(f"artifact {artifact.get('id')}: its run reports another commit")
-            continue
-        if branch_sha is None:
-            # By the branch's commit, never its name: a tag can share the name.
-            ref = github.json(f"git/ref/heads/{urllib.parse.quote(branch, safe='/')}")
-            branch_sha = str((ref.get("object") or {}).get("sha"))
-            if not SHA.fullmatch(branch_sha):
-                raise ValueError(f"the branch {branch} did not resolve to a commit")
-        try:
-            status = github.json(
-                f"compare/{uploaded['head_sha']}...{branch_sha}?per_page=1").get("status")
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            notes.append(f"artifact {artifact.get('id')}: its commit could not be compared "
-                         f"({error})")
-            continue
-        if status not in ("identical", "ahead"):
-            notes.append(f"artifact {artifact.get('id')}: {branch} does not contain "
-                         f"{uploaded['head_sha'][:12]} ({status})")
-            continue
-        return artifact, notes
+        head_repository = run.get("head_repository_id",
+                                  (run.get("head_repository") or {}).get("id"))
+        if (run.get("event") in events and run.get("head_branch") == branch
+                and run.get("head_sha") == head_sha and str(head_repository) == repo_id
+                and (run_id is None or str(run.get("id")) == run_id)):
+            candidates.append(run)
+        else:
+            notes.append(f"run {run.get('id')}: a {run.get('event')} run of "
+                         f"{run.get('head_branch')} in repository {head_repository}, passed over")
+    if not candidates:
+        return None, notes
+    # By the branch's commit, never its name: a tag can share the name.
+    ref = github.json(f"git/ref/heads/{urllib.parse.quote(branch, safe='/')}")
+    branch_sha = str((ref.get("object") or {}).get("sha"))
+    if not SHA.fullmatch(branch_sha):
+        raise ValueError(f"the branch {branch} did not resolve to a commit")
+    try:
+        status = github.json(f"compare/{head_sha}...{branch_sha}?per_page=1").get("status")
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        notes.append(f"{head_sha[:12]} could not be compared with {branch} ({error})")
+        return None, notes
+    if status not in ("identical", "ahead"):
+        notes.append(f"{branch} does not contain {head_sha[:12]} ({status})")
+        return None, notes
+    candidates.sort(key=lambda r: (str(r.get("created_at")), int(r.get("id") or 0)), reverse=True)
+    for run in candidates[:LOOKUP_CAP]:
+        listing = github.json(f"actions/runs/{int(run['id'])}/artifacts"
+                              f"?name={urllib.parse.quote(name)}&per_page=100")
+        found = []
+        for artifact in listing.get("artifacts") or []:
+            uploaded = artifact.get("workflow_run") or {}
+            if (artifact.get("name") == name and artifact.get("expired") is False
+                    and str(uploaded.get("id")) == str(run["id"])
+                    and uploaded.get("head_sha") == head_sha
+                    and str(uploaded.get("head_repository_id")) == repo_id):
+                found.append(artifact)
+        if found:
+            newest = max(found, key=lambda a: (str(a.get("created_at")), int(a.get("id") or 0)))
+            return newest, notes
+        notes.append(f"run {run['id']}: no unexpired artifact {name} of its own")
     if len(candidates) > LOOKUP_CAP:
         notes.append(f"stopped after {LOOKUP_CAP} of {len(candidates)} candidates")
     return None, notes
@@ -724,9 +746,13 @@ def run_trusted():
     github = GitHub(os.environ.get("GITHUB_API_URL", "https://api.github.com"),
                     os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("YORIWAKE_TOKEN", ""))
     wanted = artifact_name(key)
+    commit = key_commit(key)
+    if commit is None:
+        warn(f"the restored cache entry's key names no commit, so {records}")
+        return
     try:
         artifact, notes = find_trusted(github, name=wanted, branch=branch, repo_id=repo_id,
-                                       events=events, run_id=run_id)
+                                       events=events, head_sha=commit, run_id=run_id)
         for note in notes:
             print(f"yoriwake: {note}")
         if artifact is None:

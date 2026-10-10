@@ -79,10 +79,11 @@ longer shows. A crafted map can make a run skip almost every test. So:
 - A push to the default branch or a schedule that saves the map also uploads each map's digest
   (the `map-digest` file the plugin writes) as an artifact named after the cache key,
   `yoriwake-maps-<hash of the key>`. An exact-key hit saves nothing and uploads nothing.
-- A pull request looks up the artifact for the entry it restored and keeps it only when GitHub's
-  record of the run that uploaded it says: a `push` or `schedule` event, on the default branch
-  (`default-branch` when set), in this repository, at a commit the default branch contains. It
-  looks at the five newest candidates at most.
+- A pull request takes the commit from the key of the entry it restored, asks GitHub for the
+  `push` and `schedule` runs of the default branch (`default-branch` when set) at that commit, and
+  keeps the artifact one of them uploaded for that key only when GitHub's record of the run says:
+  in this repository, at a commit the default branch contains. It asks five runs at most.
+  Artifacts other runs upload under the same name cannot hide that one.
 - With no artifact qualifying, the list names no map and the run records every test, with a
   warning saying why: a plugin release that predates the list would ignore an empty one.
   Otherwise it passes the list as `-Pyoriwake.trustedMaps`. The plugin narrows only from a map
@@ -178,6 +179,7 @@ Each of these leaves the trusted-map list empty, so the pull request records eve
 | Warning | Cause |
 |---|---|
 | the token cannot read this repository's artifacts | The job's token lacks `actions: read`. |
+| the restored cache entry's key names no commit | The restored entry was not saved by this action. |
 | no run of `<branch>` uploaded the digests of the restored cache entry | The restored entry is not one a push to the default branch or a schedule saved (a pull request's own, or one an older action release saved), its artifact expired, or the upload failed. The next push to the default branch uploads them. |
 | looking up the default branch's digests failed | An API error or rate limit, or an artifact that could not be read. |
 | the default branch or the repository id is unknown | The event has no default branch and `default-branch` is empty. |

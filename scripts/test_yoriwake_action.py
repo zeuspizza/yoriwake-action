@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -725,7 +726,8 @@ class CommandLine(unittest.TestCase):
 
 REPO_ID = "4242"
 DEFAULT_SHA = "d" * 40
-KEY = "yoriwake-Linux-ci-test--map7-" + "c" * 40
+KEY_SHA = "c" * 40
+KEY = "yoriwake-Linux-ci-test--map7-" + KEY_SHA
 NAME = "yoriwake-maps-" + hashlib.sha256(KEY.encode()).hexdigest()[:32]
 DIGEST = "ab" * 32
 
@@ -764,11 +766,19 @@ class FakeGitHub:
                         code, message, headers = (answer if isinstance(answer, tuple)
                                                   else (answer, "no", {}))
                         return self.answer(code, {"message": message}, headers)
-                path = self.path.split("?")[0]
+                path, _, query = self.path.partition("?")
                 parts = path.strip("/").split("/")
-                if path == "/repos/o/r/actions/artifacts":
-                    return self.answer(200, {"total_count": len(fake.artifacts),
-                                             "artifacts": fake.artifacts})
+                asked = dict(urllib.parse.parse_qsl(query))
+                if path == "/repos/o/r/actions/runs":
+                    fields = {"branch": "head_branch", "event": "event", "head_sha": "head_sha"}
+                    runs = [run for run in fake.runs.values()
+                            if all(run[field] == asked[param]
+                                   for param, field in fields.items() if param in asked)]
+                    return self.answer(200, {"total_count": len(runs), "workflow_runs": runs})
+                if path.startswith("/repos/o/r/actions/runs/") and parts[-1] == "artifacts":
+                    found = [a for a in fake.artifacts if str(a["workflow_run"]["id"]) == parts[5]
+                             and a["name"] == asked.get("name", a["name"])]
+                    return self.answer(200, {"total_count": len(found), "artifacts": found})
                 if parts[:4] == ["repos", "o", "r", "actions"] and parts[4] == "runs":
                     run = fake.runs.get(parts[5])
                     return self.answer(200 if run else 404, run or {})
@@ -813,8 +823,9 @@ class FakeGitHub:
     def upload(self, artifact_id, *, event="push", branch="main", repo_id=REPO_ID, sha=None,
                created="2026-10-01T00:00:00Z", text=f"test-7f007aca\t{DIGEST}\n", status=None,
                name=NAME):
-        """An artifact of a run of the given event, branch and repository, newest added last."""
-        sha = sha or f"{artifact_id:040x}"
+        """An artifact of its own run of the given event, branch and repository, at the restored
+        key's commit unless `sha` names another; newest added last."""
+        sha = sha or KEY_SHA
         run_id = str(9000 + artifact_id)
         self.artifacts.insert(0, {
             "id": artifact_id, "name": name, "expired": False, "created_at": created,
@@ -823,7 +834,8 @@ class FakeGitHub:
                              "head_sha": sha},
         })
         self.runs[run_id] = {"id": int(run_id), "event": event, "head_branch": branch,
-                             "head_sha": sha}
+                             "head_sha": sha, "head_repository_id": int(repo_id),
+                             "created_at": created}
         self.compare[sha] = status or "ahead"
         self.zips[str(artifact_id)] = zipped(text) if isinstance(text, str) else text
 
@@ -886,11 +898,11 @@ class Trusted(unittest.TestCase):
         self.assertIn("::warning", out)
         self.assertEqual(self.github.paths("/zip"), [])
 
-    def test_a_fork_s_branch_named_like_the_default_is_filtered_without_asking_for_its_run(self):
+    def test_a_fork_s_branch_named_like_the_default_is_filtered_without_asking_for_its_files(self):
         self.github.upload(1, repo_id="777")
         self.trusted()
         self.assertEqual(self.listed(), "")
-        self.assertEqual(self.github.paths("/runs/"), [])
+        self.assertEqual(self.github.paths("/artifacts"), [])
 
     def test_a_tag_named_like_the_default_branch_at_a_commit_off_it_is_skipped(self):
         self.github.upload(1, status="diverged")
@@ -912,15 +924,46 @@ class Trusted(unittest.TestCase):
         self.github.upload(1)
         self.trusted()
         self.assertEqual(self.github.paths("/compare/"),
-                         [f"/repos/o/r/compare/{1:040x}...{DEFAULT_SHA}?per_page=1"])
+                         [f"/repos/o/r/compare/{KEY_SHA}...{DEFAULT_SHA}?per_page=1"])
 
-    def test_an_artifact_whose_run_reports_another_commit_is_skipped_before_any_compare(self):
+    def test_an_artifact_that_names_another_commit_than_its_run_is_not_downloaded(self):
         self.github.upload(1)
-        self.github.runs[str(9000 + 1)]["head_sha"] = "e" * 40
+        self.github.artifacts[0]["workflow_run"]["head_sha"] = "e" * 40
         self.trusted()
         self.assertEqual(self.listed(), "")
-        self.assertEqual(self.github.paths("/compare/"), [])
         self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_run_at_another_commit_than_the_restored_key_s_is_not_asked_for_its_files(self):
+        self.github.upload(1, sha="e" * 40)
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/artifacts"), [])
+
+    def test_the_runs_are_found_by_branch_event_and_the_restored_key_s_commit(self):
+        self.github.upload(1)
+        self.trusted()
+        self.assertEqual(self.github.paths("/actions/runs?"), [
+            f"/repos/o/r/actions/runs?branch=main&event={event}&head_sha={KEY_SHA}&per_page=100"
+            for event in ("push", "schedule")])
+
+    def test_a_schedule_run_s_artifact_is_the_list(self):
+        self.github.upload(1, event="schedule")
+        self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+
+    def test_an_expired_artifact_is_not_downloaded(self):
+        self.github.upload(1)
+        self.github.artifacts[0]["expired"] = True
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/zip"), [])
+
+    def test_a_key_that_names_no_commit_asks_nothing(self):
+        self.github.upload(1)
+        out = self.trusted(matched_key=KEY[:-40] + "crafted")
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.requests, [])
+        self.assertIn("::warning", out)
 
     def test_a_failing_compare_skips_that_candidate(self):
         self.github.upload(1)
@@ -937,24 +980,33 @@ class Trusted(unittest.TestCase):
         self.github.upload(1, created="2026-10-01T00:00:00Z", text=f"older\t{DIGEST}\n")
         self.github.upload(2, created="2026-10-02T00:00:00Z", text=f"newest\t{'cd' * 32}\n")
         self.github.upload(3, event="pull_request", created="2026-10-03T00:00:00Z")
-        self.github.upload(4, created="2026-10-04T00:00:00Z", status="diverged")
+        self.github.upload(4, repo_id="777", created="2026-10-04T00:00:00Z")
         self.trusted()
         self.assertEqual(self.listed(), f"newest\t{'cd' * 32}\n")
 
-    def test_many_uploads_under_the_trusted_name_cost_a_bounded_number_of_requests(self):
+    def test_uploads_under_the_trusted_name_by_other_runs_cannot_hide_the_trusted_one(self):
         self.github.upload(1, created="2026-09-01T00:00:00Z")
-        for n in range(2, 102):
-            self.github.upload(n, event="pull_request", created=f"2026-10-01T00:00:{n % 60:02d}Z")
+        for n in range(2, 152):
+            self.github.upload(n, event="pull_request", repo_id="777",
+                               created=f"2026-10-01T00:00:{n % 60:02d}Z")
         self.trusted()
+        self.assertEqual(self.listed(), f"test-7f007aca\t{DIGEST}\n")
+        self.assertEqual(self.github.paths("/artifacts?"),
+                         [f"/repos/o/r/actions/runs/9001/artifacts?name={NAME}&per_page=100"])
+
+    def test_runs_without_the_artifact_are_looked_at_up_to_the_cap(self):
+        for n in range(1, 9):
+            self.github.upload(n, name="something-else", created=f"2026-10-01T00:00:0{n}Z")
+        out = self.trusted()
         self.assertEqual(self.listed(), "")
-        self.assertEqual(len(self.github.paths("/actions/artifacts?")), 1)
-        self.assertLessEqual(len(self.github.paths("/runs/")) + len(self.github.paths("/compare/")),
-                             10)
+        self.assertEqual(len(self.github.paths("/artifacts?")), ya.LOOKUP_CAP)
+        self.assertEqual(len(self.github.paths("/compare/")), 1)
+        self.assertIn(f"stopped after {ya.LOOKUP_CAP} of 8", out)
         self.assertEqual(self.github.paths("/zip"), [])
 
     def test_a_token_without_actions_read_leaves_the_list_empty_and_names_the_permission(self):
         self.github.upload(1)
-        self.github.status["/repos/o/r/actions/artifacts"] = 403
+        self.github.status["/repos/o/r/actions/runs"] = 403
         out = self.trusted()
         self.assertEqual(self.listed(), "")
         self.assertIn("actions: read", out)
@@ -982,7 +1034,7 @@ class Trusted(unittest.TestCase):
 
     def test_an_artifact_named_for_another_key_is_not_this_entry_s(self):
         self.github.upload(1)
-        self.trusted(matched_key=KEY + "-other")
+        self.trusted(matched_key=KEY.replace("-test-", "-other-"))
         self.assertEqual(self.listed(), "")
         self.assertEqual(self.github.paths("/zip"), [])
 
