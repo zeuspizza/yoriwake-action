@@ -187,3 +187,8 @@ declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
   the default branch's permissions.
 - It never decides which tests run.
 - It never fails the job for a step of its own.
+
+## Its own tests
+
+`.github/workflows/test.yml` takes a `plugin-ref` when dispatched: a full commit SHA, a branch or a
+tag, since `actions/checkout` reads a short SHA as a branch name.
