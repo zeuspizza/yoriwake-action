@@ -1,6 +1,6 @@
 name: test
 
-# Proves the action on real runners against the demo build in fixture/.
+# Proves the action on real runners against the demo build in fixture/. (probe)
 #
 # Dispatched, one job per OS plays every event in turn. Its first run of the action records and
 # saves a map as a push to the default branch would; each later run starts from a reset fixture,
