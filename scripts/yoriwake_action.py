@@ -679,6 +679,22 @@ def run_deepen():
         set_outputs(history_ready="true" if ready else "false")
 
 
+def rate_limited(error: urllib.error.HTTPError) -> bool:
+    """Whether GitHub refused for its rate limit, which it answers with 429 or with the 403 a
+    missing permission also gets."""
+    if error.code == 429:
+        return True
+    if error.code != 403:
+        return False
+    if (error.headers or {}).get("x-ratelimit-remaining") == "0":
+        return True
+    try:
+        body = error.read(4096).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return False
+    return "rate limit" in body.lower()
+
+
 def run_trusted():
     """Writes the empty list before anything else, so every failure leaves a list naming no map,
     and a run with such a list records."""
@@ -719,7 +735,10 @@ def run_trusted():
             return
         lines = trusted_lines(github, artifact)
     except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
+        if rate_limited(error):
+            warn(f"GitHub's API rate limit refused the lookup of the default branch's digests "
+                 f"(HTTP {error.code}), so {records}")
+        elif error.code in (401, 403):
             warn(f"the token cannot read this repository's artifacts (HTTP {error.code}); give the "
                  f"job `permissions: actions: read`. Until then {records}")
         else:

@@ -749,7 +749,7 @@ class FakeGitHub:
         self.runs = {}
         self.compare = {}  # head_sha -> status, compared against DEFAULT_SHA
         self.zips = {}
-        self.status = {}  # path prefix -> HTTP status to answer instead
+        self.status = {}  # path prefix -> status, or (status, message, headers), to answer instead
         self.requests = []
         fake = self
 
@@ -759,9 +759,11 @@ class FakeGitHub:
 
             def do_GET(self):
                 fake.requests.append((self.path, self.headers.get("Authorization")))
-                for prefix, code in fake.status.items():
+                for prefix, answer in fake.status.items():
                     if self.path.startswith(prefix):
-                        return self.answer(code, {"message": "no"})
+                        code, message, headers = (answer if isinstance(answer, tuple)
+                                                  else (answer, "no", {}))
+                        return self.answer(code, {"message": message}, headers)
                 path = self.path.split("?")[0]
                 parts = path.strip("/").split("/")
                 if path == "/repos/o/r/actions/artifacts":
@@ -790,9 +792,11 @@ class FakeGitHub:
                     return None
                 return self.answer(404, {})
 
-            def answer(self, code, data):
+            def answer(self, code, data, headers=None):
                 body = json.dumps(data).encode()
                 self.send_response(code)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -954,6 +958,16 @@ class Trusted(unittest.TestCase):
         out = self.trusted()
         self.assertEqual(self.listed(), "")
         self.assertIn("actions: read", out)
+
+    def test_a_rate_limit_is_named_as_one_not_as_a_missing_permission(self):
+        for answer in ((403, "API rate limit exceeded", {"x-ratelimit-remaining": "0"}),
+                       (403, "You have exceeded a secondary rate limit.", {}),
+                       (429, "Too many requests", {})):
+            self.github.status["/repos/o/r/actions/"] = answer
+            out = self.trusted()
+            self.assertEqual(self.listed(), "", answer)
+            self.assertIn("rate limit", out, answer)
+            self.assertNotIn("actions: read", out, answer)
 
     def test_no_artifact_leaves_the_list_empty_and_warns(self):
         out = self.trusted()
