@@ -122,6 +122,7 @@ runs:
         path: |
           ${{ steps.setup.outputs.map-dir }}
           !${{ steps.setup.outputs.map-dir }}/*/raw
+          !${{ steps.setup.outputs.map-dir }}/*/selection.tsv
         key: ${{ steps.setup.outputs.key }}
         restore-keys: ${{ steps.setup.outputs.restore-prefix }}
 
@@ -276,6 +277,7 @@ runs:
         path: |
           ${{ steps.setup.outputs.map-dir }}
           !${{ steps.setup.outputs.map-dir }}/*/raw
+          !${{ steps.setup.outputs.map-dir }}/*/selection.tsv
         key: ${{ steps.setup.outputs.key }}
 
     # The digests of what the save wrote, for pull requests to list. An exact-key hit saves

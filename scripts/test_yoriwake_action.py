@@ -1044,6 +1044,38 @@ class UploadConditions(unittest.TestCase):
         self.assertTrue(any("continue-on-error: true" in line for line in upload))
 
 
+class CachedPaths(unittest.TestCase):
+    """What the cache holds. `selection.tsv` leaves tests out of a complement run and no digest
+    covers it, so it never comes from a cache; restore and save name the same paths, or a saved
+    entry is never restored."""
+
+    @staticmethod
+    def paths(lines):
+        start = next(i for i, line in enumerate(lines) if line.strip() == "path: |") + 1
+        return [line.strip() for line in lines[start:start + 3]]
+
+    def test_restore_and_save_leave_out_raw_records_and_the_selection_record(self):
+        restore = self.paths(action_step("restore"))
+        self.assertEqual(restore, [
+            "${{ steps.setup.outputs.map-dir }}",
+            "!${{ steps.setup.outputs.map-dir }}/*/raw",
+            "!${{ steps.setup.outputs.map-dir }}/*/selection.tsv",
+        ])
+        self.assertEqual(self.paths(action_step("save")), restore)
+
+    def test_the_test_workflow_plants_entries_under_the_action_s_paths(self):
+        lines = (Path(__file__).resolve().parent.parent / ".github" / "workflows"
+                 / "test.yml").read_text().splitlines()
+        saves = [i for i, line in enumerate(lines) if "actions/cache/save@" in line]
+        self.assertTrue(saves)
+        for at in saves:
+            self.assertEqual(self.paths(lines[at:]), [
+                "fixture/.gradle/yoriwake",
+                "!fixture/.gradle/yoriwake/*/raw",
+                "!fixture/.gradle/yoriwake/*/selection.tsv",
+            ])
+
+
 def gradle_step_script():
     """The `run` block of action.yml's gradle step, as bash receives it."""
     lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()

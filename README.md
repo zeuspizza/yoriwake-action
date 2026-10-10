@@ -127,7 +127,8 @@ has the threat model.
 
 The cache key is made of the runner OS, the workflow, the job, `key`, the map format and the
 commit; a restore falls back to the newest entry with the same prefix. Each job keeps its own maps.
-The undecoded `raw/` records are never cached.
+The undecoded `raw/` records are never cached, nor `selection.tsv`: it decides what a complement run
+leaves out, no map digest covers it, so it comes only from the run that wrote it.
 
 ## Outputs
 

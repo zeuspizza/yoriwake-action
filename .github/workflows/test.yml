@@ -348,6 +348,7 @@ jobs:
           path: |
             fixture/.gradle/yoriwake
             !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
           key: ${{ steps.planted-key.outputs.key }}
       - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         run: |
@@ -392,6 +393,7 @@ jobs:
           path: |
             fixture/.gradle/yoriwake
             !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
           key: ${{ steps.shadowed-key.outputs.key }}
       - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
