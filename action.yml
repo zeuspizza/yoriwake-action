@@ -39,6 +39,11 @@ inputs:
     description: >-
       The branch whose pushes record and save the map. Defaults to the repository's default branch.
     default: ''
+  retention-days:
+    description: >-
+      Days the default branch's map digests stay readable. A pull request restoring an entry whose
+      digests expired records every test. GitHub caps it at the repository's retention limit.
+    default: '90'
   github-token:
     description: >-
       Reads the digests the default branch's runs uploaded, on pull requests. Needs
@@ -304,3 +309,4 @@ runs:
         name: ${{ steps.digests.outputs.artifact-name }}
         path: ${{ steps.digests.outputs.path }}
         if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}

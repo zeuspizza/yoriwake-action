@@ -123,6 +123,7 @@ has the threat model.
 | `working-directory` | `.` | The directory holding `gradlew`. |
 | `map-dir` | `<working-directory>/.gradle/yoriwake` | The map directory to cache. Set it when the build uses `--project-cache-dir`. |
 | `default-branch` | the repository's | The branch whose pushes record and save the map, and whose uploaded digests pull requests trust. |
+| `retention-days` | `90` | How many days the uploaded digests stay readable. A pull request restoring an entry whose digests expired records every test. The repository's retention limit caps it. |
 | `github-token` | `github.token` | Reads the uploaded digests on pull requests. Needs `actions: read`. |
 
 The cache key is made of the runner OS, the workflow, the job, `key`, the map format and the

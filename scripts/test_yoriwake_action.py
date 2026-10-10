@@ -1057,6 +1057,14 @@ class UploadConditions(unittest.TestCase):
         self.assertFalse(any("overwrite" in line for line in upload))
         self.assertTrue(any("continue-on-error: true" in line for line in upload))
 
+    def test_the_upload_keeps_the_digests_for_the_retention_days_input(self):
+        self.assertIn("        retention-days: ${{ inputs.retention-days }}",
+                      action_step("upload-digests"))
+        lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
+        at = lines.index("  retention-days:")
+        default = next(line for line in lines[at:] if line.strip().startswith("default:"))
+        self.assertEqual(default.strip(), "default: '90'")
+
 
 class CachedPaths(unittest.TestCase):
     """What the cache holds. `selection.tsv` leaves tests out of a complement run and no digest
