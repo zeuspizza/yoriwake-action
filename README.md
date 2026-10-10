@@ -220,3 +220,15 @@ declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
 
 `.github/workflows/test.yml` takes a `plugin-ref` when dispatched: a full commit SHA, a branch or a
 tag, since `actions/checkout` reads a short SHA as a branch name.
+
+On a push to `main` and on every pull request it also runs the action on the real events: the
+push records and uploads the digests, and each pull request then narrows from `main`'s entry,
+runs everything when it restores a crafted entry it planted under `main`'s key, and records with
+the permission warning when its token lacks `actions: read`. A pull request before `main` has an
+entry warns and proves nothing. The jobs build the plugin from `PLUGIN_REF` in that workflow
+until a release writes map digests.
+
+Maintainer's one-time check, which no workflow can open for itself: a pull request from a fork.
+Its run gets a fork's read-only token and runs the same jobs; they should end as on a pull request
+from a branch: `honest` narrows (the read-only token reads the digests), `shadow` runs every test
+as `map-untrusted`, and `no-actions-read` records with the warning naming `actions: read`.

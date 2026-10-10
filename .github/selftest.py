@@ -7,6 +7,7 @@
     python3 .github/selftest.py craft <honest map directory>
     python3 .github/selftest.py cache-key <prefix> <key input> <suffix>
     python3 .github/selftest.py check --outcome failure --kind select --ran selected ...
+    python3 .github/selftest.py check ... --warning "actions: read"
 
 `payload` writes an event payload for the action to read through YORIWAKE_EVENT_PATH, so one
 dispatched job can play every event. `reset` puts the fixture back between two runs of the action
@@ -197,6 +198,16 @@ def check(args):
             if not data.get("wouldBeSkipped"):
                 problems.append(f"{path}: selection would have skipped nothing")
 
+    if args.warning:
+        # The warnings file each run of the action writes into its state directory.
+        pattern = os.path.join(os.environ.get("RUNNER_TEMP", ""), "yoriwake-action", "*", "warnings")
+        written = ""
+        for path in glob.glob(pattern):
+            with open(path, encoding="utf-8") as handle:
+                written += handle.read()
+        if args.warning not in written:
+            problems.append(f"no warning of the action says {args.warning!r}: {written!r}")
+
     print(f"ran {len(ran)}, failed {sorted(failed)}")
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
@@ -228,6 +239,7 @@ def main():
     assertion.add_argument("--broken", action="store_true")
     assertion.add_argument("--decline")
     assertion.add_argument("--observed", action="store_true")
+    assertion.add_argument("--warning")
     args = parser.parse_args()
     if args.command == "payload":
         payload(args.event, args.base, args.file, args.labels)
