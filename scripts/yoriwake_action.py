@@ -165,6 +165,10 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
     if not trusted_listed:
         return record("the trusted-map list names no map: no run of the default branch vouched "
                       "for the restored maps")
+    # The flags reach Gradle word-split, so a path with whitespace would arrive cut in two and
+    # fail the build instead of recording.
+    if any(c.isspace() for c in trusted_list):
+        return record(f"the trusted-map list's path holds whitespace: {trusted_list}")
 
     if observe:
         flags = ["-Pyoriwake.observe", "-Pyoriwake.select=false"]

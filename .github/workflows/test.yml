@@ -21,7 +21,7 @@ on:
       plugin-ref:
         description: >-
           A zeuspizza/yoriwake commit to build the plugin from. Empty applies the released plugin
-          and skips the runs that need a later one (the full-run label and observe).
+          and skips the runs that need a later one (selection, the full-run label and observe).
         default: ''
 
 permissions:
@@ -169,13 +169,14 @@ jobs:
           cp -R fixture/.gradle/yoriwake "$RUNNER_TEMP/honest-map"
 
       # A pull request from a depth-1 checkout: restores the map, fetches the base, selects.
+      # The released plugin writes no map digest, so nothing vouches for its map and it records.
       - if: ${{ !cancelled() }}
         run: |
           python3 .github/selftest.py reset
           python3 .github/selftest.py payload pull_request "$BASE" "$RUNNER_TEMP/pr.json"
           python3 .github/selftest.py mutate
       - id: select
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         continue-on-error: true # the change breaks two tests
         uses: ./
         env:
@@ -185,7 +186,7 @@ jobs:
           working-directory: fixture
           key: ${{ env.KEY }}
       - name: check the pull request selected, and ran every test the change breaks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         env:
           ACTION_OUTCOME: ${{ steps.select.outcome }}
           RUN_KIND: ${{ steps.select.outputs.run-kind }}

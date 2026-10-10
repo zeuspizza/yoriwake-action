@@ -122,6 +122,12 @@ class ChooseFlags(unittest.TestCase):
             self.assertEqual((decision.kind, decision.flags), ("record", OFF), observe)
             self.assertIn("vouched", decision.warnings[0])
 
+    def test_a_pull_request_whose_trusted_list_path_holds_whitespace_records(self):
+        # A self-hosted runner's temp directory can hold a space; the flags are word-split.
+        decision = choose("pull_request", pull_request(), trusted_list="/runner one/trusted.tsv")
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
+        self.assertIn("whitespace", decision.warnings[0])
+
     def test_a_recording_run_passes_no_trusted_list(self):
         for event, payload in (("push", push()), ("schedule", {}), ("pull_request_target", push())):
             self.assertFalse(any("trustedMaps" in flag for flag in choose(event, payload).flags),
@@ -875,6 +881,14 @@ class Trusted(unittest.TestCase):
         self.trusted()
         self.assertEqual(self.github.paths("/compare/"),
                          [f"/repos/o/r/compare/{1:040x}...{DEFAULT_SHA}?per_page=1"])
+
+    def test_an_artifact_whose_run_reports_another_commit_is_skipped_before_any_compare(self):
+        self.github.upload(1)
+        self.github.runs[str(9000 + 1)]["head_sha"] = "e" * 40
+        self.trusted()
+        self.assertEqual(self.listed(), "")
+        self.assertEqual(self.github.paths("/compare/"), [])
+        self.assertEqual(self.github.paths("/zip"), [])
 
     def test_a_failing_compare_skips_that_candidate(self):
         self.github.upload(1)

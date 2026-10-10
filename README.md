@@ -169,6 +169,7 @@ leaves a run that records every test, and prints a warning that the job summary 
 | HEAD is ..., not the commit this run was started for | A step before the action checked out another commit, so the map is not saved under this commit. |
 | the trusted-map list has no file | The action's first step could not create it. |
 | the trusted-map list names no map: no run of the default branch vouched for the restored maps | Printed after one of the warnings below, which says why. |
+| the trusted-map list's path holds whitespace: `<path>` | The runner's temp directory has a space or another blank in it, which a self-hosted runner's work directory can. |
 
 Each of these leaves the trusted-map list empty, so the pull request records every test:
 
