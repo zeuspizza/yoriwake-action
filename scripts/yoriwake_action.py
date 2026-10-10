@@ -112,7 +112,7 @@ def owned_flags(tasks: str, gradle_args: str) -> list:
 
 def choose_flags(event, payload, *, observe, isolated_capture, default_branch, map_restored,
                  history_ready, job_total, key, tasks, gradle_args, trusted_list,
-                 trusted_listed) -> Decision:
+                 trusted_listed, trusted_ok) -> Decision:
     """The run kind, its Gradle flags, and whether the map may be saved, for one event."""
     capture = OFF + (["-Pyoriwake.isolatedCapture"] if isolated_capture else [])
 
@@ -158,6 +158,10 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
     if history_ready is not True:
         return record(f"the history is not ready: no merge base with origin/{base}, or a "
                       "restored map's capture commit is not on it")
+    # The lookup replaces the list before anything else, so only a lookup that finished proves
+    # the list is its own and not one a restored cache entry put in its place.
+    if not trusted_ok:
+        return record("the trusted-map lookup did not finish")
     if not trusted_list:
         return record("the trusted-map list has no file")
     # A plugin that predates the list ignores it and would narrow from any map restored, so an
@@ -650,6 +654,7 @@ def run_flags():
         gradle_args=os.environ.get("YORIWAKE_GRADLE_ARGS", ""),
         trusted_list=os.environ.get("YORIWAKE_TRUSTED_LIST", ""),
         trusted_listed=listed_any(os.environ.get("YORIWAKE_TRUSTED_LIST", "")),
+        trusted_ok=os.environ.get("YORIWAKE_TRUSTED_OUTCOME") == "success",
     )
     for message in decision.warnings:
         warn(message)

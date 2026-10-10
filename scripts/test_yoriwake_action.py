@@ -46,6 +46,7 @@ def choose(event, payload=None, **overrides):
         gradle_args="",
         trusted_list=LIST,
         trusted_listed=True,
+        trusted_ok=True,
     )
     facts.update(overrides)
     return ya.choose_flags(event, payload, **facts)
@@ -121,6 +122,12 @@ class ChooseFlags(unittest.TestCase):
                               trusted_listed=False)
             self.assertEqual((decision.kind, decision.flags), ("record", OFF), observe)
             self.assertIn("vouched", decision.warnings[0])
+
+    def test_a_pull_request_whose_lookup_did_not_finish_records_whatever_the_list_holds(self):
+        # A restore can plant a list where the lookup writes it; only a finished lookup replaced it.
+        decision = choose("pull_request", pull_request(), trusted_ok=False)
+        self.assertEqual((decision.kind, decision.flags), ("record", OFF))
+        self.assertIn("lookup", decision.warnings[0])
 
     def test_a_pull_request_whose_trusted_list_path_holds_whitespace_records(self):
         # A self-hosted runner's temp directory can hold a space; the flags are word-split.
@@ -584,6 +591,7 @@ class CommandLine(unittest.TestCase):
             "YORIWAKE_JOB_TOTAL": "1",
             "YORIWAKE_TASKS": "test",
             "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+            "YORIWAKE_TRUSTED_OUTCOME": "success",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs(), {
@@ -625,10 +633,30 @@ class CommandLine(unittest.TestCase):
                 "YORIWAKE_MAP_RESTORED": "true",
                 "YORIWAKE_HISTORY_READY": "true",
                 "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+                "YORIWAKE_TRUSTED_OUTCOME": "success",
             })
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.outputs()["kind"], "record", text)
             self.assertEqual(self.outputs()["flags"], " ".join(OFF), text)
+
+    def test_flags_records_unless_the_lookup_step_succeeded(self):
+        (self.state / "trusted.tsv").write_text(f"test-7f007aca\t{'ab' * 32}\n")
+        for outcome in ("failure", "skipped", ""):
+            self.out.write_text("")
+            result = self.run_helper("flags", {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_EVENT_PATH": self.payload(pull_request()),
+                "YORIWAKE_MAP_RESTORED": "true",
+                "YORIWAKE_HISTORY_READY": "true",
+                "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+                "YORIWAKE_TRUSTED_OUTCOME": outcome,
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.outputs()["kind"], "record", outcome)
+
+    def test_the_flags_step_reads_the_lookup_step_s_outcome(self):
+        self.assertIn("        YORIWAKE_TRUSTED_OUTCOME: ${{ steps.trusted.outcome }}",
+                      action_step("flags"))
 
     def test_an_unreadable_payload_records_and_warns(self):
         result = self.run_helper("flags", {

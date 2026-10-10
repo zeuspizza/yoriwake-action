@@ -168,6 +168,7 @@ leaves a run that records every test, and prints a warning that the job summary 
 | the event `<name>` neither selects nor saves a map | The workflow runs on an event other than `push`, `schedule` or `pull_request`. |
 | a push to `<ref>`: ... is not the default branch | A push to another branch. Set `default-branch` if the repository's default is not the branch that should save. |
 | HEAD is ..., not the commit this run was started for | A step before the action checked out another commit, so the map is not saved under this commit. |
+| the trusted-map lookup did not finish | The step that looks up the default branch's digests failed or was skipped, so the list may not be its own. |
 | the trusted-map list has no file | The action's first step could not create it. |
 | the trusted-map list names no map: no run of the default branch vouched for the restored maps | Printed after one of the warnings below, which says why. |
 | the trusted-map list's path holds whitespace: `<path>` | The runner's temp directory has a space or another blank in it, which a self-hosted runner's work directory can. |

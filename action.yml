@@ -194,6 +194,7 @@ runs:
         YORIWAKE_TASKS: ${{ inputs.tasks }}
         YORIWAKE_GRADLE_ARGS: ${{ inputs.gradle-args }}
         YORIWAKE_TRUSTED_LIST: ${{ steps.setup.outputs.trusted-list }}
+        YORIWAKE_TRUSTED_OUTCOME: ${{ steps.trusted.outcome }}
       run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" flags'
 
     - id: gradle
