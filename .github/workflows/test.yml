@@ -334,8 +334,8 @@ jobs:
 
       # A crafted map saved under the restore prefix, as a pull request's own run saves one through
       # a workflow edit it then reverts. No run uploaded digests for that entry, so the list names
-      # nothing and the plugin runs every test as map-unverified. Selected from without the list,
-      # this map skips both tests the change breaks.
+      # nothing and the action records every test. Selected from without the list, this map skips
+      # both tests the change breaks.
       - id: planted-key
         if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         run: |
@@ -363,7 +363,7 @@ jobs:
         with:
           working-directory: fixture
           key: ${{ env.KEY }}-planted
-      - name: check a planted map runs every test as map-unverified
+      - name: check a planted map makes the run record every test
         if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
         env:
           ACTION_OUTCOME: ${{ steps.planted.outcome }}
@@ -371,8 +371,8 @@ jobs:
           MAP_RESTORED: ${{ steps.planted.outputs.map-restored }}
           HISTORY_READY: ${{ steps.planted.outputs.history-ready }}
         run: >-
-          python3 .github/selftest.py check --outcome failure --kind select
-          --map-restored true --history-ready true --ran all --broken --decline map-unverified
+          python3 .github/selftest.py check --outcome failure --kind record
+          --map-restored true --history-ready true --ran all --broken
 
       # The crafted map under the exact key a run vouched for with the honest map's digests, as an
       # entry shadowing the default branch's by its key would be: the list names the honest

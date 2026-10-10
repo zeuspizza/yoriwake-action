@@ -111,7 +111,8 @@ def owned_flags(tasks: str, gradle_args: str) -> list:
 
 
 def choose_flags(event, payload, *, observe, isolated_capture, default_branch, map_restored,
-                 history_ready, job_total, key, tasks, gradle_args, trusted_list) -> Decision:
+                 history_ready, job_total, key, tasks, gradle_args, trusted_list,
+                 trusted_listed) -> Decision:
     """The run kind, its Gradle flags, and whether the map may be saved, for one event."""
     capture = OFF + (["-Pyoriwake.isolatedCapture"] if isolated_capture else [])
 
@@ -159,13 +160,18 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
                       "restored map's capture commit is not on it")
     if not trusted_list:
         return record("the trusted-map list has no file")
+    # A plugin that predates the list ignores it and would narrow from any map restored, so an
+    # empty list is never left to the plugin to refuse.
+    if not trusted_listed:
+        return record("the trusted-map list names no map: no run of the default branch vouched "
+                      "for the restored maps")
 
     if observe:
         flags = ["-Pyoriwake.observe", "-Pyoriwake.select=false"]
     else:
         flags = ["-Pyoriwake.select", "-Pyoriwake.observe=false"]
     flags.append(f"-Pyoriwake.base=origin/{base}")
-    # Always passed, empty or not: the plugin then narrows only from a map the list names.
+    # The plugin then narrows only from a map the list names.
     flags.append(f"-Pyoriwake.trustedMaps={trusted_list}")
     if FULL_RUN_LABEL in labels(payload):
         flags.append("-Pyoriwake.fullRun")
@@ -281,6 +287,14 @@ def collect_digests(map_dir: Path) -> list:
         if LIST_LINE.fullmatch(line):
             lines.append(line)
     return lines
+
+
+def listed_any(path: str) -> bool:
+    """Whether the list at `path` names at least one map."""
+    try:
+        return bool(path) and bool(parse_trusted_list(Path(path).read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def write_list(path: Path, lines: list):
@@ -631,6 +645,7 @@ def run_flags():
         tasks=os.environ.get("YORIWAKE_TASKS", ""),
         gradle_args=os.environ.get("YORIWAKE_GRADLE_ARGS", ""),
         trusted_list=os.environ.get("YORIWAKE_TRUSTED_LIST", ""),
+        trusted_listed=listed_any(os.environ.get("YORIWAKE_TRUSTED_LIST", "")),
     )
     for message in decision.warnings:
         warn(message)
@@ -656,8 +671,8 @@ def run_deepen():
 
 
 def run_trusted():
-    """Writes the empty list before anything else, so every failure leaves a list naming no map:
-    the plugin then runs every test of a selecting run (`map-unverified`)."""
+    """Writes the empty list before anything else, so every failure leaves a list naming no map,
+    and a run with such a list records."""
     target = Path(os.environ["YORIWAKE_TRUSTED_LIST"])
     write_list(target, [])
     name, payload = event()
@@ -677,9 +692,9 @@ def run_trusted():
         branch = os.environ.get("GITHUB_REF_NAME", "")
         events, run_id = ("workflow_dispatch",), os.environ.get("GITHUB_RUN_ID", "")
     repo_id = os.environ.get("GITHUB_REPOSITORY_ID", "")
-    unverified = "a selecting run runs every test (map-unverified)"
+    records = "this run records every test"
     if not is_branch_name(branch) or not repo_id:
-        warn(f"the default branch or the repository id is unknown, so {unverified}")
+        warn(f"the default branch or the repository id is unknown, so {records}")
         return
     github = GitHub(os.environ.get("GITHUB_API_URL", "https://api.github.com"),
                     os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("YORIWAKE_TOKEN", ""))
@@ -691,20 +706,20 @@ def run_trusted():
             print(f"yoriwake: {note}")
         if artifact is None:
             warn(f"no run of {branch} uploaded the digests of the restored cache entry "
-                 f"({wanted}), so {unverified}")
+                 f"({wanted}), so {records}")
             return
         lines = trusted_lines(github, artifact)
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             warn(f"the token cannot read this repository's artifacts (HTTP {error.code}); give the "
-                 f"job `permissions: actions: read`. Until then {unverified}")
+                 f"job `permissions: actions: read`. Until then {records}")
         else:
             warn(f"looking up the default branch's digests failed (HTTP {error.code}), so "
-                 f"{unverified}")
+                 f"{records}")
         return
     except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError,
             zipfile.BadZipFile) as error:
-        warn(f"looking up the default branch's digests failed ({error}), so {unverified}")
+        warn(f"looking up the default branch's digests failed ({error}), so {records}")
         return
     write_list(target, lines)
     print(f"yoriwake: trusted-map list from artifact {artifact.get('id')}: {len(lines)} maps")

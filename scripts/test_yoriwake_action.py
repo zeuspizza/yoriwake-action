@@ -45,6 +45,7 @@ def choose(event, payload=None, **overrides):
         tasks="test",
         gradle_args="",
         trusted_list=LIST,
+        trusted_listed=True,
     )
     facts.update(overrides)
     return ya.choose_flags(event, payload, **facts)
@@ -109,9 +110,17 @@ class ChooseFlags(unittest.TestCase):
             self.assertIn(TRUSTED, decision.flags, (observe, labels))
 
     def test_a_pull_request_without_a_trusted_list_file_records_and_warns(self):
-        decision = choose("pull_request", pull_request(), trusted_list="")
+        decision = choose("pull_request", pull_request(), trusted_list="", trusted_listed=False)
         self.assertEqual((decision.kind, decision.flags), ("record", OFF))
         self.assertIn("trusted-map list", decision.warnings[0])
+
+    def test_a_pull_request_whose_trusted_list_names_no_map_records_and_says_why(self):
+        # A plugin that ignores the list would otherwise narrow from whatever was restored.
+        for observe in (False, True):
+            decision = choose("pull_request", pull_request(), observe=observe,
+                              trusted_listed=False)
+            self.assertEqual((decision.kind, decision.flags), ("record", OFF), observe)
+            self.assertIn("vouched", decision.warnings[0])
 
     def test_a_recording_run_passes_no_trusted_list(self):
         for event, payload in (("push", push()), ("schedule", {}), ("pull_request_target", push())):
@@ -560,6 +569,7 @@ class CommandLine(unittest.TestCase):
         return str(path)
 
     def test_flags_reads_the_event_from_the_environment(self):
+        (self.state / "trusted.tsv").write_text(f"test-7f007aca\t{'ab' * 32}\n")
         result = self.run_helper("flags", {
             "GITHUB_EVENT_NAME": "pull_request",
             "GITHUB_EVENT_PATH": self.payload(pull_request(labels=["yoriwake:full-run"])),
@@ -598,6 +608,21 @@ class CommandLine(unittest.TestCase):
             })
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.outputs()["save"], "false", real)
+
+    def test_flags_records_when_the_trusted_list_names_no_map(self):
+        for text in ("", "garbled line\n"):
+            self.out.write_text("")
+            (self.state / "trusted.tsv").write_text(text)
+            result = self.run_helper("flags", {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_EVENT_PATH": self.payload(pull_request()),
+                "YORIWAKE_MAP_RESTORED": "true",
+                "YORIWAKE_HISTORY_READY": "true",
+                "YORIWAKE_TRUSTED_LIST": str(self.state / "trusted.tsv"),
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.outputs()["kind"], "record", text)
+            self.assertEqual(self.outputs()["flags"], " ".join(OFF), text)
 
     def test_an_unreadable_payload_records_and_warns(self):
         result = self.run_helper("flags", {

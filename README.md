@@ -83,10 +83,11 @@ longer shows. A crafted map can make a run skip almost every test. So:
   record of the run that uploaded it says: a `push` or `schedule` event, on the default branch
   (`default-branch` when set), in this repository, at a commit the default branch contains. It
   looks at the five newest candidates at most.
-- It always passes that list as `-Pyoriwake.trustedMaps`, empty when no artifact qualified. The
-  plugin narrows only from a map whose digest the list names, and otherwise runs every test as
-  `map-unverified` (not listed) or `map-untrusted` (listed with another digest). The job summary
-  names which.
+- With no artifact qualifying, the list names no map and the run records every test, with a
+  warning saying why: a plugin release that predates the list would ignore an empty one.
+  Otherwise it passes the list as `-Pyoriwake.trustedMaps`. The plugin narrows only from a map
+  whose digest the list names, and runs every test as `map-unverified` (not listed) or
+  `map-untrusted` (listed with another digest); the job summary names which.
 
 This needs `actions: read` on the job's token, as in the example. A fork's pull request gets what
 its workflow grants, read-only.
@@ -99,8 +100,10 @@ What it cannot cover:
   request's runs restore such an entry.
 - **Persistent self-hosted runners** that run pull requests: code an earlier job left behind runs
   in later ones, the default branch's included. Run pull requests on ephemeral runners.
-- **A plugin release older than the action's.** A build applying a plugin without
-  `-Pyoriwake.trustedMaps` ignores the list and selects from any map restored.
+- **A plugin release older than the action's, with a non-empty list.** A build applying a plugin
+  without `-Pyoriwake.trustedMaps` ignores the list and selects from any map restored. Such a
+  plugin writes no `map-digest`, so its default branch uploads nothing and the list stays empty;
+  only a default branch on a newer plugin than its pull requests could fill it.
 
 A pull request whose own entry is restored runs every test on each push until that entry expires,
 after seven days unused, or is deleted: `gh cache list --ref refs/pull/<number>/merge`, then
@@ -164,9 +167,9 @@ leaves a run that records every test, and prints a warning that the job summary 
 | a push to `<ref>`: ... is not the default branch | A push to another branch. Set `default-branch` if the repository's default is not the branch that should save. |
 | HEAD is ..., not the commit this run was started for | A step before the action checked out another commit, so the map is not saved under this commit. |
 | the trusted-map list has no file | The action's first step could not create it. |
+| the trusted-map list names no map: no run of the default branch vouched for the restored maps | Printed after one of the warnings below, which says why. |
 
-Each of these leaves a pull request selecting with an empty trusted-map list, so the plugin runs
-every test as `map-unverified`:
+Each of these leaves the trusted-map list empty, so the pull request records every test:
 
 | Warning | Cause |
 |---|---|
@@ -182,7 +185,7 @@ declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
 ## What it never does
 
 - It never passes a selection flag on an event other than `pull_request`, without a restored map
-  and a ready history, or without the trusted-map list.
+  and a ready history, or without a trusted-map list that names a map.
 - It never saves the map from a pull request, or from an event that can run pull request code with
   the default branch's permissions.
 - It never decides which tests run.
