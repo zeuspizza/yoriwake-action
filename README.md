@@ -101,6 +101,25 @@ What it cannot cover:
   request's runs restore such an entry.
 - **Persistent self-hosted runners** that run pull requests: code an earlier job left behind runs
   in later ones, the default branch's included. Run pull requests on ephemeral runners.
+- **A tag named like the default branch.** GitHub records a tag push's run with the tag's name
+  as its branch, so a run started by pushing a tag `main` looks like a push to `main`. The commit
+  check stops a tag on a commit `main` does not contain. It does not stop one on a commit a merge
+  commit brought into `main`, such as a reverted commit of a merged pull request that added an
+  upload step: that run uploads digests for a crafted map, and the same person's pull request
+  narrows from it. It takes write access to push the tag. Block such tags with a tag ruleset:
+  Settings > Rules > Rulesets > New ruleset > New tag ruleset, Enforcement status Active, no
+  bypass list, Target tags "Include by pattern" with your default branch's name (`main`), and
+  "Restrict creations", "Restrict updates" and "Restrict deletions" checked. Or, from a shell:
+
+  ```bash
+  gh api repos/<owner>/<repo>/rulesets -X POST --input - <<'JSON'
+  {"name": "No tag named like the default branch", "target": "tag", "enforcement": "active",
+   "conditions": {"ref_name": {"include": ["refs/tags/main"], "exclude": []}},
+   "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}]}
+  JSON
+  ```
+
+  Repositories that merge pull requests only by squash or rebase have no such commit in `main`.
 - **A plugin release older than the action's, with a non-empty list.** A build applying a plugin
   without `-Pyoriwake.trustedMaps` ignores the list and selects from any map restored. Such a
   plugin writes no `map-digest`, so its default branch uploads nothing and the list stays empty;
