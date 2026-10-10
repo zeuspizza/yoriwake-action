@@ -7,7 +7,8 @@ skipped. Pushes to the default branch run every test and save the map; pull requ
 and select.
 
 Nothing it does can skip a test on its own: it only passes flags, and the plugin decides. Every
-step of its own that fails, or cannot tell, leaves a run that records every test.
+step of its own that fails, or cannot tell, leaves a run that records every test. A pull request
+narrows only from a map a run of the default branch recorded.
 
 ## Usage
 
@@ -20,6 +21,10 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+  actions: read # to read the map digests the default branch's runs uploaded
 
 jobs:
   test:
@@ -45,7 +50,7 @@ from a map the plugin would refuse.
 | Event | Flags | Saves the map |
 |---|---|---|
 | `push` to the default branch, `schedule` | selection off: the run records every test (`-Pyoriwake.isolatedCapture` with `isolated-capture: true`) | yes, when HEAD is the commit the run was started for |
-| `pull_request` | `-Pyoriwake.select -Pyoriwake.base=origin/<base>`, or `-Pyoriwake.observe -Pyoriwake.base=origin/<base>` with `observe: true`; `-Pyoriwake.fullRun` added when the pull request carries the `yoriwake:full-run` label | never |
+| `pull_request` | `-Pyoriwake.select -Pyoriwake.base=origin/<base> -Pyoriwake.trustedMaps=<list>`, or `-Pyoriwake.observe` in place of `select` with `observe: true`; `-Pyoriwake.fullRun` added when the pull request carries the `yoriwake:full-run` label | never |
 | any other (`pull_request_target`, `issue_comment`, `workflow_dispatch`, `merge_group`, pushes to other branches) | selection off: the run records every test | never, and a warning names the event |
 
 The action always states every mode flag on the command line (`-Pyoriwake.select=false
@@ -59,13 +64,49 @@ it records every test.
 
 Events that run with the default branch's permissions but can check out pull request code
 (`pull_request_target`, `issue_comment`, `workflow_run`) never save, so a pull request cannot put
-its own map into the cache the default branch's runs read. A pull request can still save into its
-own cache scope through a workflow it edits; see the plugin reference's
-[Who can write the map you restore](https://github.com/zeuspizza/yoriwake/blob/main/docs/reference.md#who-can-write-the-map-you-restore).
+its own map into the cache the default branch's runs read.
 
 The label applies to the run it is present for. It must be on the pull request before the run
 starts, so subscribe to `labeled` as above; a re-run reuses the old event, so push again after
 adding it.
+
+## Which maps a pull request trusts
+
+A pull request's run can save a cache entry that its later runs restore before the default
+branch's, through a workflow or build edit it pushes and then reverts, which the final diff no
+longer shows. A crafted map can make a run skip almost every test. So:
+
+- A push to the default branch or a schedule that saves the map also uploads each map's digest
+  (the `map-digest` file the plugin writes) as an artifact named after the cache key,
+  `yoriwake-maps-<hash of the key>`. An exact-key hit saves nothing and uploads nothing.
+- A pull request looks up the artifact for the entry it restored and keeps it only when GitHub's
+  record of the run that uploaded it says: a `push` or `schedule` event, on the default branch
+  (`default-branch` when set), in this repository, at a commit the default branch contains. It
+  looks at the five newest candidates at most.
+- It always passes that list as `-Pyoriwake.trustedMaps`, empty when no artifact qualified. The
+  plugin narrows only from a map whose digest the list names, and otherwise runs every test as
+  `map-unverified` (not listed) or `map-untrusted` (listed with another digest). The job summary
+  names which.
+
+This needs `actions: read` on the job's token, as in the example. A fork's pull request gets what
+its workflow grants, read-only.
+
+What it cannot cover:
+
+- **Code in a cache entry a pull request wrote.** A restore extracts whatever the entry holds,
+  wherever the runner can write, not only the map: an init script, a jar, the action's own
+  scripts. That code runs outside any diff and can change the map after the check. Only that pull
+  request's runs restore such an entry.
+- **Persistent self-hosted runners** that run pull requests: code an earlier job left behind runs
+  in later ones, the default branch's included. Run pull requests on ephemeral runners.
+- **A plugin release older than the action's.** A build applying a plugin without
+  `-Pyoriwake.trustedMaps` ignores the list and selects from any map restored.
+
+A pull request whose own entry is restored runs every test on each push until that entry expires,
+after seven days unused, or is deleted: `gh cache list --ref refs/pull/<number>/merge`, then
+`gh cache delete <key>`. The plugin reference's
+[Who can write the map you restore](https://github.com/zeuspizza/yoriwake/blob/main/docs/reference.md#who-can-write-the-map-you-restore)
+has the threat model.
 
 ## Inputs
 
@@ -78,7 +119,8 @@ adding it.
 | `key` | | Added to the cache key. Required in a matrix (`strategy.job-total` above 1): without it a matrix job records every test and saves no map, since its legs would share one map. |
 | `working-directory` | `.` | The directory holding `gradlew`. |
 | `map-dir` | `<working-directory>/.gradle/yoriwake` | The map directory to cache. Set it when the build uses `--project-cache-dir`. |
-| `default-branch` | the repository's | The branch whose pushes record and save the map. |
+| `default-branch` | the repository's | The branch whose pushes record and save the map, and whose uploaded digests pull requests trust. |
+| `github-token` | `github.token` | Reads the uploaded digests on pull requests. Needs `actions: read`. |
 
 The cache key is made of the runner OS, the workflow, the job, `key`, the map format and the
 commit; a restore falls back to the newest entry with the same prefix. Each job keeps its own maps.
@@ -121,6 +163,17 @@ leaves a run that records every test, and prints a warning that the job summary 
 | the event `<name>` neither selects nor saves a map | The workflow runs on an event other than `push`, `schedule` or `pull_request`. |
 | a push to `<ref>`: ... is not the default branch | A push to another branch. Set `default-branch` if the repository's default is not the branch that should save. |
 | HEAD is ..., not the commit this run was started for | A step before the action checked out another commit, so the map is not saved under this commit. |
+| the trusted-map list has no file | The action's first step could not create it. |
+
+Each of these leaves a pull request selecting with an empty trusted-map list, so the plugin runs
+every test as `map-unverified`:
+
+| Warning | Cause |
+|---|---|
+| the token cannot read this repository's artifacts | The job's token lacks `actions: read`. |
+| no run of `<branch>` uploaded the digests of the restored cache entry | The restored entry is not one a push to the default branch or a schedule saved (a pull request's own, or one an older action release saved), its artifact expired, or the upload failed. The next push to the default branch uploads them. |
+| looking up the default branch's digests failed | An API error or rate limit, or an artifact that could not be read. |
+| the default branch or the repository id is unknown | The event has no default branch and `default-branch` is empty. |
 
 The plugin can still run everything on a run the action asked to select, for its own reasons (no
 usable map, a change it cannot see through, a requested full run); the summary's "Forced or
@@ -128,8 +181,8 @@ declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
 
 ## What it never does
 
-- It never passes a selection flag on an event other than `pull_request`, or without a restored map
-  and a ready history.
+- It never passes a selection flag on an event other than `pull_request`, without a restored map
+  and a ready history, or without the trusted-map list.
 - It never saves the map from a pull request, or from an event that can run pull request code with
   the default branch's permissions.
 - It never decides which tests run.

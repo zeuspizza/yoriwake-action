@@ -7,8 +7,10 @@ name: test
 # restores that map under an event payload `.github/selftest.py payload` wrote, and is checked.
 # The cache key holds the job's id, so the runs share one job to share one map. The branch
 # dispatched from stands in for the default branch: its tip is both the commit the map is
-# captured at and the pull requests' base. Every check reads the test results and the plugin's
-# decision records, not the log.
+# captured at and the pull requests' base, and the digests the first run uploads are the ones
+# its pull requests list. Every check reads the test results and the plugin's decision records,
+# not the log. The cache scope is the dispatched branch's throughout, so these runs show what the
+# action and the plugin do with a planted entry, not that GitHub scopes a pull request's own.
 #
 # A pull request runs the helper's tests and the action under the real pull_request event.
 on:
@@ -113,7 +115,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      actions: read # to list the cache entries the action saved
+      actions: read # to list the cache entries the action saved and read the digests it uploaded
     env:
       LATER_PLUGIN: ${{ inputs.plugin-ref != '' }}
       GH_TOKEN: ${{ github.token }}
@@ -164,6 +166,7 @@ jobs:
           count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-" --jq .total_count)
           echo "cache entries under $PREFIX$KEY-: $count"
           test "$count" -ge 1
+          cp -R fixture/.gradle/yoriwake "$RUNNER_TEMP/honest-map"
 
       # A pull request from a depth-1 checkout: restores the map, fetches the base, selects.
       - if: ${{ !cancelled() }}
@@ -328,3 +331,95 @@ jobs:
         run: >-
           python3 .github/selftest.py check --outcome failure --kind observe
           --map-restored true --history-ready true --ran all --broken --observed
+
+      # A crafted map saved under the restore prefix, as a pull request's own run saves one through
+      # a workflow edit it then reverts. No run uploaded digests for that entry, so the list names
+      # nothing and the plugin runs every test as map-unverified. Selected from without the list,
+      # this map skips both tests the change breaks.
+      - id: planted-key
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py craft "$RUNNER_TEMP/honest-map"
+          echo "key=$(python3 .github/selftest.py cache-key "$PREFIX" "$KEY-planted" crafted)" >> "$GITHUB_OUTPUT"
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+          key: ${{ steps.planted-key.outputs.key }}
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: planted
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-planted
+      - name: check a planted map runs every test as map-unverified
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.planted.outcome }}
+          RUN_KIND: ${{ steps.planted.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.planted.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.planted.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran all --broken --decline map-unverified
+
+      # The crafted map under the exact key a run vouched for with the honest map's digests, as an
+      # entry shadowing the default branch's by its key would be: the list names the honest
+      # digest, the plugin recomputes the crafted map's, and runs every test as map-untrusted.
+      - id: shadowed-key
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py craft "$RUNNER_TEMP/honest-map"
+          key=$(python3 .github/selftest.py cache-key "$PREFIX" "$KEY-shadowed" "$GITHUB_SHA")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          YORIWAKE_STATE="$RUNNER_TEMP/vouch" YORIWAKE_MAP_DIR="$RUNNER_TEMP/honest-map" \
+            YORIWAKE_CACHE_KEY="$key" python3 scripts/yoriwake_action.py digests
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+          key: ${{ steps.shadowed-key.outputs.key }}
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.shadowed-key.outputs.artifact-name }}
+          path: ${{ steps.shadowed-key.outputs.path }}
+          if-no-files-found: error
+      - if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        run: |
+          python3 .github/selftest.py reset
+          python3 .github/selftest.py mutate
+      - id: shadowed
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        continue-on-error: true
+        uses: ./
+        env:
+          YORIWAKE_EVENT_NAME: pull_request
+          YORIWAKE_EVENT_PATH: ${{ runner.temp }}/pr.json
+        with:
+          working-directory: fixture
+          key: ${{ env.KEY }}-shadowed
+      - name: check a map the list vouches for with another digest runs every test as map-untrusted
+        if: ${{ !cancelled() && env.LATER_PLUGIN == 'true' }}
+        env:
+          ACTION_OUTCOME: ${{ steps.shadowed.outcome }}
+          RUN_KIND: ${{ steps.shadowed.outputs.run-kind }}
+          MAP_RESTORED: ${{ steps.shadowed.outputs.map-restored }}
+          HISTORY_READY: ${{ steps.shadowed.outputs.history-ready }}
+        run: >-
+          python3 .github/selftest.py check --outcome failure --kind select
+          --map-restored true --history-ready true --ran all --broken --decline map-untrusted

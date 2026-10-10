@@ -1,13 +1,17 @@
 """The decisions the yoriwake action makes outside Gradle.
 
-Three subcommands, each run by one step of `action.yml` and each reading its facts from the
+Five subcommands, each run by one step of `action.yml` and each reading its facts from the
 environment:
 
 - `deepen`: fetch the pull request's base and deepen a shallow clone until selection has a base
   the restored maps are related to. Answers `history-ready`.
+- `trusted`: on a pull request, write the trusted-map list from the digests a run of the default
+  branch uploaded for the restored cache entry; an empty list on anything it cannot establish.
 - `flags`: choose the run's Gradle flags from the event. Answers `kind`, `flags` and `save`.
 - `summary`: write the job summary from the files this run's test tasks wrote, and stage each
   observation report for upload.
+- `digests`: on a run that saved the map, stage every map's digest for upload as the artifact a
+  pull request's `trusted` looks up. Answers `artifact-name`, `path` and `count`.
 
 Every path that cannot establish what selection needs ends in a run that selects nothing: only
 the exact word `true` counts as an established map or history, and anything this script cannot
@@ -16,12 +20,18 @@ read becomes a warning, never a selection flag.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -30,7 +40,7 @@ FULL_RUN_LABEL = "yoriwake:full-run"
 # The flags this action sets. One named in the action's inputs would change what runs without
 # the action knowing, so such a run records instead. The gradle step in action.yml drops the
 # same flags from the Gradle command in bash; change both together.
-OWNED_FLAG = re.compile(r"yoriwake\.(select|observe|complement|fullRun|base)(=|$)")
+OWNED_FLAG = re.compile(r"yoriwake\.(select|observe|complement|fullRun|base|trustedMaps)(=|$)")
 
 # Every run states both mode flags on the command line, which outranks gradle.properties and the
 # environment: a `yoriwake.select` there would otherwise make a recording run select.
@@ -38,6 +48,20 @@ OFF = ["-Pyoriwake.select=false", "-Pyoriwake.observe=false"]
 
 # Deepening steps for a shallow clone, after the base's own tip: commits from each tip, then all.
 DEPTHS = (1, 50, 500, None)
+
+# The trusted-map list: the digests a run of the default branch uploaded, as an artifact named
+# from the cache key it saved (keys hold characters artifact names reject).
+ARTIFACT_PREFIX = "yoriwake-maps-"
+LIST_MEMBER = "trusted.tsv"
+LIST_LINE = re.compile(r"[^\t\r\n]+\t[0-9a-f]{64}")
+DIGEST_LINE = re.compile(r"sha256 ([0-9a-f]{64})")
+SHA = re.compile(r"[0-9a-f]{40}")
+# Events whose runs ran the default branch's own workflow and code.
+TRUSTED_EVENTS = ("push", "schedule")
+# Candidates looked at beyond the listing: anyone can upload under the name, so the requests a
+# lookup makes are bounded whatever was uploaded.
+LOOKUP_CAP = 5
+MAX_LIST_BYTES = 1 << 20
 
 STAMP = re.compile(r"[0-9a-fA-F]{7,40}")
 MAP_DIR_SUFFIX = re.compile(r"-[0-9a-f]{8}$")
@@ -87,7 +111,7 @@ def owned_flags(tasks: str, gradle_args: str) -> list:
 
 
 def choose_flags(event, payload, *, observe, isolated_capture, default_branch, map_restored,
-                 history_ready, job_total, key, tasks, gradle_args) -> Decision:
+                 history_ready, job_total, key, tasks, gradle_args, trusted_list) -> Decision:
     """The run kind, its Gradle flags, and whether the map may be saved, for one event."""
     capture = OFF + (["-Pyoriwake.isolatedCapture"] if isolated_capture else [])
 
@@ -133,12 +157,16 @@ def choose_flags(event, payload, *, observe, isolated_capture, default_branch, m
     if history_ready is not True:
         return record(f"the history is not ready: no merge base with origin/{base}, or a "
                       "restored map's capture commit is not on it")
+    if not trusted_list:
+        return record("the trusted-map list has no file")
 
     if observe:
         flags = ["-Pyoriwake.observe", "-Pyoriwake.select=false"]
     else:
         flags = ["-Pyoriwake.select", "-Pyoriwake.observe=false"]
     flags.append(f"-Pyoriwake.base=origin/{base}")
+    # Always passed, empty or not: the plugin then narrows only from a map the list names.
+    flags.append(f"-Pyoriwake.trustedMaps={trusted_list}")
     if FULL_RUN_LABEL in labels(payload):
         flags.append("-Pyoriwake.fullRun")
     return Decision("observe" if observe else "select", flags, False, [])
@@ -225,6 +253,137 @@ def deepen(base, map_dir, cwd) -> History:
             return History(True, step, notes)
         notes.append(f"step {step}: {missing}")
     return History(False, step, notes)
+
+
+# --- the trusted-map list ------------------------------------------------------------------------
+
+
+def artifact_name(key: str) -> str:
+    return ARTIFACT_PREFIX + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
+def parse_trusted_list(text: str) -> list:
+    """The well-formed `<map directory>\t<sha256>` lines; any other line names no map."""
+    return [line for line in text.splitlines() if LIST_LINE.fullmatch(line)]
+
+
+def collect_digests(map_dir: Path) -> list:
+    """Each task map's digest, as the plugin wrote it to `map-digest`, as list lines."""
+    lines = []
+    if not map_dir.is_dir():
+        return lines
+    for digest_file in sorted(map_dir.glob("*/map-digest")):
+        try:
+            found = DIGEST_LINE.fullmatch(digest_file.read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeDecodeError):
+            continue
+        line = f"{digest_file.parent.name}\t{found.group(1)}" if found else ""
+        if LIST_LINE.fullmatch(line):
+            lines.append(line)
+    return lines
+
+
+def write_list(path: Path, lines: list):
+    """Replaced whole, so a reader sees the old list or the new one, never part of one."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+class GitHub:
+    """The few REST calls the lookup makes, with stdlib urllib."""
+
+    def __init__(self, api_url: str, repository: str, token: str):
+        self.api = api_url.rstrip("/")
+        self.repo = repository
+        self.token = token
+
+    def request(self, path: str):
+        request = urllib.request.Request(f"{self.api}/repos/{self.repo}/{path}", headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "yoriwake-action",
+        })
+        if self.token:
+            # Not copied onto a redirect, so the pre-signed storage URL an artifact's zip
+            # redirects to never receives the token.
+            request.add_unredirected_header("Authorization", f"Bearer {self.token}")
+        return urllib.request.urlopen(request, timeout=30)
+
+    def json(self, path: str):
+        with self.request(path) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} did not answer an object")
+        return data
+
+    def download(self, path: str) -> bytes:
+        with self.request(path) as response:
+            body = response.read(MAX_LIST_BYTES * 4 + 1)
+        if len(body) > MAX_LIST_BYTES * 4:
+            raise ValueError("the artifact is larger than a list of digests can be")
+        return body
+
+
+def find_trusted(github: GitHub, *, name: str, branch: str, repo_id: str, events,
+                 run_id: str | None = None):
+    """The newest artifact named `name` that a run of `events` on `branch` of this repository
+    uploaded at a commit `branch` contains, or None, and why each candidate was passed over.
+
+    Candidates are filtered on the listing's own fields before any further request, and at
+    most LOOKUP_CAP of the rest are looked at.
+    """
+    notes = []
+    listing = github.json(f"actions/artifacts?name={urllib.parse.quote(name)}&per_page=100")
+    candidates = []
+    for artifact in listing.get("artifacts") or []:
+        run = artifact.get("workflow_run") or {}
+        if (artifact.get("name") == name and artifact.get("expired") is False
+                and run.get("head_branch") == branch
+                and str(run.get("head_repository_id")) == repo_id
+                and SHA.fullmatch(str(run.get("head_sha")))):
+            candidates.append(artifact)
+    candidates.sort(key=lambda a: (str(a.get("created_at")), int(a.get("id") or 0)), reverse=True)
+    branch_sha = None
+    for artifact in candidates[:LOOKUP_CAP]:
+        uploaded = artifact["workflow_run"]
+        run = github.json(f"actions/runs/{int(uploaded['id'])}")
+        if run.get("event") not in events or (run_id is not None and str(run.get("id")) != run_id):
+            notes.append(f"artifact {artifact.get('id')}: uploaded by a {run.get('event')} run")
+            continue
+        if run.get("head_sha") != uploaded["head_sha"]:
+            notes.append(f"artifact {artifact.get('id')}: its run reports another commit")
+            continue
+        if branch_sha is None:
+            # By the branch's commit, never its name: a tag can share the name.
+            ref = github.json(f"git/ref/heads/{urllib.parse.quote(branch, safe='/')}")
+            branch_sha = str((ref.get("object") or {}).get("sha"))
+            if not SHA.fullmatch(branch_sha):
+                raise ValueError(f"the branch {branch} did not resolve to a commit")
+        try:
+            status = github.json(
+                f"compare/{uploaded['head_sha']}...{branch_sha}?per_page=1").get("status")
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            notes.append(f"artifact {artifact.get('id')}: its commit could not be compared "
+                         f"({error})")
+            continue
+        if status not in ("identical", "ahead"):
+            notes.append(f"artifact {artifact.get('id')}: {branch} does not contain "
+                         f"{uploaded['head_sha'][:12]} ({status})")
+            continue
+        return artifact, notes
+    if len(candidates) > LOOKUP_CAP:
+        notes.append(f"stopped after {LOOKUP_CAP} of {len(candidates)} candidates")
+    return None, notes
+
+
+def trusted_lines(github: GitHub, artifact) -> list:
+    body = github.download(f"actions/artifacts/{int(artifact['id'])}/zip")
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        member = archive.getinfo(LIST_MEMBER)
+        if member.file_size > MAX_LIST_BYTES:
+            raise ValueError("the list is larger than a list of digests can be")
+        return parse_trusted_list(archive.read(member).decode("utf-8"))
 
 
 # --- summary -------------------------------------------------------------------------------------
@@ -471,6 +630,7 @@ def run_flags():
         key=os.environ.get("YORIWAKE_KEY", "").strip(),
         tasks=os.environ.get("YORIWAKE_TASKS", ""),
         gradle_args=os.environ.get("YORIWAKE_GRADLE_ARGS", ""),
+        trusted_list=os.environ.get("YORIWAKE_TRUSTED_LIST", ""),
     )
     for message in decision.warnings:
         warn(message)
@@ -493,6 +653,70 @@ def run_deepen():
         ready = history.ready
     finally:
         set_outputs(history_ready="true" if ready else "false")
+
+
+def run_trusted():
+    """Writes the empty list before anything else, so every failure leaves a list naming no map:
+    the plugin then runs every test of a selecting run (`map-unverified`)."""
+    target = Path(os.environ["YORIWAKE_TRUSTED_LIST"])
+    write_list(target, [])
+    name, payload = event()
+    if name != "pull_request":
+        return
+    key = os.environ.get("YORIWAKE_MATCHED_KEY", "")
+    if not key:
+        return
+    if os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+        branch = os.environ.get("YORIWAKE_DEFAULT_BRANCH", "").strip()
+        if not branch and isinstance(payload, dict):
+            branch = (payload.get("repository") or {}).get("default_branch") or ""
+        events, run_id = TRUSTED_EVENTS, None
+    else:
+        # A dispatched test of the action plays the default branch with the branch it was
+        # dispatched from, and trusts only what its own run uploaded.
+        branch = os.environ.get("GITHUB_REF_NAME", "")
+        events, run_id = ("workflow_dispatch",), os.environ.get("GITHUB_RUN_ID", "")
+    repo_id = os.environ.get("GITHUB_REPOSITORY_ID", "")
+    unverified = "a selecting run runs every test (map-unverified)"
+    if not is_branch_name(branch) or not repo_id:
+        warn(f"the default branch or the repository id is unknown, so {unverified}")
+        return
+    github = GitHub(os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+                    os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("YORIWAKE_TOKEN", ""))
+    wanted = artifact_name(key)
+    try:
+        artifact, notes = find_trusted(github, name=wanted, branch=branch, repo_id=repo_id,
+                                       events=events, run_id=run_id)
+        for note in notes:
+            print(f"yoriwake: {note}")
+        if artifact is None:
+            warn(f"no run of {branch} uploaded the digests of the restored cache entry "
+                 f"({wanted}), so {unverified}")
+            return
+        lines = trusted_lines(github, artifact)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            warn(f"the token cannot read this repository's artifacts (HTTP {error.code}); give the "
+                 f"job `permissions: actions: read`. Until then {unverified}")
+        else:
+            warn(f"looking up the default branch's digests failed (HTTP {error.code}), so "
+                 f"{unverified}")
+        return
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError,
+            zipfile.BadZipFile) as error:
+        warn(f"looking up the default branch's digests failed ({error}), so {unverified}")
+        return
+    write_list(target, lines)
+    print(f"yoriwake: trusted-map list from artifact {artifact.get('id')}: {len(lines)} maps")
+
+
+def run_digests():
+    key = os.environ.get("YORIWAKE_CACHE_KEY", "")
+    lines = collect_digests(Path(os.environ.get("YORIWAKE_MAP_DIR", ".gradle/yoriwake")))
+    stage = (state_dir() or Path(".")) / "digests"
+    stage.mkdir(parents=True, exist_ok=True)
+    write_list(stage / LIST_MEMBER, lines)
+    set_outputs(artifact_name=artifact_name(key), path=str(stage), count=str(len(lines)))
 
 
 def run_summary():
@@ -519,7 +743,8 @@ def run_summary():
     set_outputs(observations="true" if staged else "false", observation_dir=str(stage))
 
 
-COMMANDS = {"flags": run_flags, "deepen": run_deepen, "summary": run_summary}
+COMMANDS = {"flags": run_flags, "deepen": run_deepen, "trusted": run_trusted,
+            "summary": run_summary, "digests": run_digests}
 
 
 def main(argv):

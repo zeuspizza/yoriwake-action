@@ -4,19 +4,25 @@
     python3 .github/selftest.py payload pull_request <base> <file> [label ...]
     python3 .github/selftest.py reset
     python3 .github/selftest.py mutate
+    python3 .github/selftest.py craft <honest map directory>
+    python3 .github/selftest.py cache-key <prefix> <key input> <suffix>
     python3 .github/selftest.py check --outcome failure --kind select --ran selected ...
 
 `payload` writes an event payload for the action to read through YORIWAKE_EVENT_PATH, so one
 dispatched job can play every event. `reset` puts the fixture back between two runs of the action
 in one job: the source unchanged, and no test results or map, so what the next run reads comes
-from the cache. `check` asserts over what the fixture's tests did, from the test results and the
-plugin's decision records: log lines say what the build believed, these files say what it did.
+from the cache. `craft` writes into the fixture a copy of a recorded map edited so that the tests
+the mutation breaks seem to execute none of `Alpha`: selected from it without a check, the run
+skips them and passes. `cache-key` prints the key the action restores under for a `key` input.
+`check` asserts over what the fixture's tests did, from the test results and the plugin's
+decision records: log lines say what the build believed, these files say what it did.
 """
 
 import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -68,6 +74,46 @@ def mutate():
         raise SystemExit(f"refusing: {ALPHA} does not contain {MUTATION[0]!r}")
     with open(ALPHA, "w", encoding="utf-8") as handle:
         handle.write(before.replace(*MUTATION, 1))
+
+
+def craft(honest):
+    """The honest map with Alpha credited to BetaTest instead of AlphaTest, in every file that
+    says which test executed or first loaded a class."""
+    shutil.rmtree(MAPS, ignore_errors=True)
+    shutil.copytree(honest, MAPS)
+    for task in glob.glob(f"{MAPS}/*/"):
+        for path in glob.glob(f"{task}decisions.tsv*"):
+            os.remove(path)
+        coverage = f"{task}coverage.tsv"
+        with open(coverage, encoding="utf-8") as handle:
+            text = handle.read()
+        edited = text.replace("dev.demo.Alpha,dev.demo.AlphaTest", "dev.demo.AlphaTest").replace(
+            "dev.demo.Beta,dev.demo.BetaTest", "dev.demo.Alpha,dev.demo.Beta,dev.demo.BetaTest")
+        if edited.count("dev.demo.Alpha,") != text.count("dev.demo.Beta,dev.demo.BetaTest"):
+            raise SystemExit(f"refusing: {coverage} is not the shape this edit expects")
+        with open(coverage, "w", encoding="utf-8") as handle:
+            handle.write(edited)
+        for name in ("first-touch.tsv", "named-touch.tsv"):
+            path = f"{task}{name}"
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+            alpha = [line for line in lines if line.endswith("\tdev.demo.Alpha")]
+            beta = [line for line in lines if line.endswith("\tdev.demo.Beta")]
+            if len(alpha) != 1 or len(beta) != 1:
+                raise SystemExit(f"refusing: {path} does not name Alpha and Beta once each")
+            jvm = beta[0].split("\t")[0]
+            lines = [line for line in lines if line not in alpha]
+            lines.append(jvm + "\t" + alpha[0].split("\t", 1)[1])
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(sorted(lines)) + "\n")
+    print(f"crafted {MAPS} from {honest}")
+
+
+def cache_key(prefix, key, suffix):
+    """The action's cache key for a `key` input, with `suffix` where the commit goes."""
+    with open("action.yml", encoding="utf-8") as handle:
+        version = re.search(r"MAP_FORMAT: '(\d+)'", handle.read()).group(1)
+    print(f"{prefix}{key}-map{version}-{suffix}")
 
 
 def results():
@@ -167,6 +213,12 @@ def main():
     write.add_argument("labels", nargs="*")
     commands.add_parser("reset")
     commands.add_parser("mutate")
+    crafting = commands.add_parser("craft")
+    crafting.add_argument("honest")
+    keying = commands.add_parser("cache-key")
+    keying.add_argument("prefix")
+    keying.add_argument("key")
+    keying.add_argument("suffix")
     assertion = commands.add_parser("check")
     assertion.add_argument("--outcome")
     assertion.add_argument("--kind")
@@ -185,6 +237,12 @@ def main():
         return 0
     if args.command == "mutate":
         mutate()
+        return 0
+    if args.command == "craft":
+        craft(args.honest)
+        return 0
+    if args.command == "cache-key":
+        cache_key(args.prefix, args.key, args.suffix)
         return 0
     return check(args)
 
