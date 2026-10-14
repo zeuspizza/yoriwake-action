@@ -35,15 +35,17 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: zeuspizza/yoriwake-action@<commit SHA of a release> # vX.Y.Z
+      - uses: zeuspizza/yoriwake-action@v0.2.0
 ```
 
 The default checkout is enough: on a pull request the action fetches the base branch and deepens a
 shallow clone as far as it needs.
 
-Use the action release named after the plugin release your build applies. The cache key carries
-the map format of that plugin release, so an upgrade of both starts from a cache miss rather than
-from a map the plugin would refuse.
+Use the action release named after the plugin release your build applies: `v0.2.0` for plugin
+`0.2.0`. The cache key carries the map format of that plugin release, so an upgrade of both starts
+from a cache miss rather than from a map the plugin would refuse. Releases are immutable, so a
+release's tag always names the code that was released; pin its commit SHA instead if your policy
+asks for one.
 
 ## What it does, by event
 
@@ -226,8 +228,8 @@ On a push to `main` and on every pull request it also runs the action on the rea
 push records and uploads the digests, and each pull request then narrows from `main`'s entry,
 runs everything when it restores a crafted entry it planted under `main`'s key, and records every
 test when its token lacks `actions: read` (with the permission warning on a private repository). A pull request before `main` has an
-entry warns and proves nothing. The jobs build the plugin from `PLUGIN_REF` in that workflow
-until a release writes map digests.
+entry warns and proves nothing. These jobs, and a dispatched run without `plugin-ref`, apply the
+plugin release `fixture/settings.gradle.kts` names.
 
 Maintainer's one-time check, which no workflow can open for itself: a pull request from a fork.
 Its run gets a fork's read-only token and runs the same jobs; they should end as on a pull request
