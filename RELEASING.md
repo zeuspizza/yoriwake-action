@@ -10,6 +10,9 @@ published, a release's tag cannot be moved or deleted and its assets cannot chan
 `uses: zeuspizza/yoriwake-action@v0.2.0` always runs the code that was released. A mistake is
 fixed by a new release, never by moving a tag. There is no moving major tag such as `v0`.
 
+A fix to the action alone is a patch release of the action, `v0.2.1` after `v0.2.0`, and goes with
+the same plugin release: its minor version names the plugin release, its patch is the action's own.
+
 ## Checklist
 
 After the plugin's `v<version>` is tagged and published to the Gradle Plugin Portal, on a branch of

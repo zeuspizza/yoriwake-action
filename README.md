@@ -35,14 +35,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: zeuspizza/yoriwake-action@v0.2.0
+      - uses: zeuspizza/yoriwake-action@v0.2.1
 ```
 
 The default checkout is enough: on a pull request the action fetches the base branch and deepens a
 shallow clone as far as it needs.
 
-Use the action release named after the plugin release your build applies: `v0.2.0` for plugin
-`0.2.0`. The cache key carries the map format of that plugin release, so an upgrade of both starts
+Use the newest action release whose minor version is the plugin release your build applies: `v0.2.1`
+for plugin `0.2.0`. The cache key carries the map format of that plugin release, so an upgrade of both starts
 from a cache miss rather than from a map the plugin would refuse. Releases are immutable, so a
 release's tag always names the code that was released; pin its commit SHA instead if your policy
 asks for one.
