@@ -1,7 +1,7 @@
 name: yoriwake
 description: >-
-  Turns on yoriwake test selection in GitHub Actions: caches the coverage map, fetches enough
-  history, chooses the flags for the event, runs Gradle and summarises what ran.
+  Runs only the Gradle tests a change can reach, with yoriwake: caches the coverage map and picks
+  the flags per event.
 author: zeuspizza
 branding:
   icon: filter
