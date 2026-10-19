@@ -723,6 +723,51 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("did not run", summary.read_text())
 
+    @staticmethod
+    def tree(root):
+        return {str(path.relative_to(root)): path.read_bytes()
+                for path in sorted(root.rglob("*")) if path.is_file()}
+
+    def test_the_save_sees_no_raw_records_or_selection_record_and_the_job_gets_them_back(self):
+        maps = self.tmp / "maps"
+        place(maps, "test-7f007aca", {"coverage.tsv": "map", "selection.tsv": "left out",
+                                      "map-digest": "sha256 " + "ab" * 32})
+        place(maps, "test-7f007aca/raw", {"r1.tsv": "record", "r2.tsv": "record"})
+        # A `raw/` below a task's own directory is part of the map.
+        place(maps, "test-7f007aca/loaded/raw", {"kept.tsv": "loaded"})
+        place(maps, "functionalTest-0a1b2c3d", {"coverage.tsv": "map"})
+        before = self.tree(maps)
+        env = {"YORIWAKE_MAP_DIR": str(maps)}
+
+        stashed = self.run_helper("stash", env)
+        self.assertEqual(stashed.returncode, 0, stashed.stderr)
+        self.assertEqual(sorted(self.tree(maps)), [
+            "functionalTest-0a1b2c3d/coverage.tsv",
+            "test-7f007aca/coverage.tsv",
+            "test-7f007aca/loaded/raw/kept.tsv",
+            "test-7f007aca/map-digest",
+        ])
+
+        unstashed = self.run_helper("unstash", env)
+        self.assertEqual(unstashed.returncode, 0, unstashed.stderr)
+        self.assertEqual(self.tree(maps), before)
+
+    def test_stash_and_unstash_leave_a_map_without_either_as_it_is(self):
+        maps = self.tmp / "maps"
+        place(maps, "test-7f007aca", {"coverage.tsv": "map"})
+        before = self.tree(maps)
+        for command in ("stash", "unstash"):
+            result = self.run_helper(command, {"YORIWAKE_MAP_DIR": str(maps)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.tree(maps), before, command)
+
+    def test_stash_and_unstash_without_a_map_directory_do_nothing(self):
+        maps = self.tmp / "absent"
+        for command in ("stash", "unstash"):
+            result = self.run_helper(command, {"YORIWAKE_MAP_DIR": str(maps)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(maps.exists(), command)
+
 
 REPO_ID = "4242"
 DEFAULT_SHA = "d" * 40
@@ -1162,15 +1207,15 @@ class UploadConditions(unittest.TestCase):
 
 class CachedPaths(unittest.TestCase):
     """What the cache holds. `selection.tsv` leaves tests out of a complement run and no digest
-    covers it, so it never comes from a cache; restore and save name the same paths, or a saved
-    entry is never restored."""
+    covers it, so it never comes from a cache. Restore and save name the same paths, unchanged,
+    or a saved entry is never restored: the path list sets an entry's version."""
 
     @staticmethod
     def paths(lines):
         start = next(i for i, line in enumerate(lines) if line.strip() == "path: |") + 1
         return [line.strip() for line in lines[start:start + 3]]
 
-    def test_restore_and_save_leave_out_raw_records_and_the_selection_record(self):
+    def test_restore_and_save_keep_the_path_list_every_entry_was_saved_under(self):
         restore = self.paths(action_step("restore"))
         self.assertEqual(restore, [
             "${{ steps.setup.outputs.map-dir }}",
@@ -1179,6 +1224,21 @@ class CachedPaths(unittest.TestCase):
         ])
         self.assertEqual(self.paths(action_step("save")), restore)
 
+    def test_the_save_runs_between_moving_both_aside_and_back(self):
+        lines = (Path(__file__).resolve().parent.parent / "action.yml").read_text().splitlines()
+        order = [line.strip()[len("- id: "):] for line in lines
+                 if line.strip().startswith("- id: ")]
+        at = order.index("save")
+        self.assertEqual(order[at - 2:at + 2], ["save-check", "stash", "save", "unstash"])
+        condition = UploadConditions().condition
+        save_if = condition("save")
+        self.assertEqual(condition("stash"), save_if)
+        self.assertNotIn("stash", save_if)
+        unstash_if = condition("unstash")
+        self.assertIn("always() && steps.stash.outcome != 'skipped'", unstash_if)
+        for step in ("stash", "unstash"):
+            self.assertIn("      continue-on-error: true", action_step(step))
+
     def test_a_restored_selection_record_is_removed_before_the_run(self):
         # The path list does not filter what a restore extracts, so an entry can still carry one.
         step = action_step("clear")
@@ -1186,12 +1246,13 @@ class CachedPaths(unittest.TestCase):
         end = next(i for i in range(at, len(step)) if not step[i].endswith("\\"))
         self.assertIn('"$MAP_DIR"/*/selection.tsv', " ".join(step[at:end + 1]))
 
-    def test_the_test_workflow_plants_entries_under_the_action_s_paths(self):
+    def test_the_test_workflow_plants_and_reads_entries_under_the_action_s_paths(self):
         lines = (Path(__file__).resolve().parent.parent / ".github" / "workflows"
                  / "test.yml").read_text().splitlines()
-        saves = [i for i, line in enumerate(lines) if "actions/cache/save@" in line]
-        self.assertTrue(saves)
-        for at in saves:
+        steps = [i for i, line in enumerate(lines)
+                 if "actions/cache/save@" in line or "actions/cache/restore@" in line]
+        self.assertTrue(steps)
+        for at in steps:
             self.assertEqual(self.paths(lines[at:]), [
                 "fixture/.gradle/yoriwake",
                 "!fixture/.gradle/yoriwake/*/raw",

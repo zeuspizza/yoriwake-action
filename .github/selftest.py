@@ -6,6 +6,7 @@
     python3 .github/selftest.py mutate
     python3 .github/selftest.py craft <honest map directory>
     python3 .github/selftest.py cache-key <prefix> <key input> <suffix>
+    python3 .github/selftest.py entry --raw present|absent
     python3 .github/selftest.py check --outcome failure --kind select --ran selected ...
     python3 .github/selftest.py check ... --warning "actions: read"
 
@@ -15,6 +16,8 @@ in one job: the source unchanged, and no test results or map, so what the next r
 from the cache. `craft` writes into the fixture a copy of a recorded map edited so that the tests
 the mutation breaks seem to execute none of `Alpha`: selected from it without a check, the run
 skips them and passes. `cache-key` prints the key the action restores under for a `key` input.
+`entry` asserts over the map directory: after the action, a task's `raw/` records are still there
+for the job's later steps; restored from the entry the action saved, none are, and the maps are.
 `check` asserts over what the fixture's tests did, from the test results and the plugin's
 decision records: log lines say what the build believed, these files say what it did.
 """
@@ -115,6 +118,25 @@ def cache_key(prefix, key, suffix):
     with open("action.yml", encoding="utf-8") as handle:
         version = re.search(r"MAP_FORMAT: '(\d+)'", handle.read()).group(1)
     print(f"{prefix}{key}-map{version}-{suffix}")
+
+
+def entry(raw):
+    tasks = glob.glob(f"{MAPS}/*/")
+    with_raw = sorted(t for t in tasks if glob.glob(f"{t}raw/*"))
+    digests = glob.glob(f"{MAPS}/*/map-digest")
+    print(f"{len(tasks)} task directories, {len(digests)} with a map-digest, "
+          f"{len(with_raw)} with raw/ records")
+    if raw == "present" and not with_raw:
+        print("FAIL: no task directory holds raw/ records after the action", file=sys.stderr)
+        return 1
+    if raw == "absent":
+        problems = [f"{t} holds raw/" for t in tasks if os.path.exists(f"{t}raw")]
+        if not digests:
+            problems.append("no map-digest was restored")
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        return 1 if problems else 0
+    return 0
 
 
 def results():
@@ -230,6 +252,8 @@ def main():
     keying.add_argument("prefix")
     keying.add_argument("key")
     keying.add_argument("suffix")
+    holding = commands.add_parser("entry")
+    holding.add_argument("--raw", choices=("present", "absent"), required=True)
     assertion = commands.add_parser("check")
     assertion.add_argument("--outcome")
     assertion.add_argument("--kind")
@@ -256,6 +280,8 @@ def main():
     if args.command == "cache-key":
         cache_key(args.prefix, args.key, args.suffix)
         return 0
+    if args.command == "entry":
+        return entry(args.raw)
     return check(args)
 
 

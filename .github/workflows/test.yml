@@ -422,7 +422,28 @@ jobs:
           count=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$PREFIX$KEY-" --jq .total_count)
           echo "cache entries under $PREFIX$KEY-: $count"
           test "$count" -ge 1
+          python3 .github/selftest.py entry --raw present
           cp -R fixture/.gradle/yoriwake "$RUNNER_TEMP/honest-map"
+
+      # The entry the first push saved, restored under the action's own paths: the maps, and none
+      # of the raw records the action moves aside for the save.
+      - id: saved-key
+        if: ${{ !cancelled() }}
+        run: |
+          python3 .github/selftest.py reset
+          echo "key=$(python3 .github/selftest.py cache-key "$PREFIX" "$KEY" "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fixture/.gradle/yoriwake
+            !fixture/.gradle/yoriwake/*/raw
+            !fixture/.gradle/yoriwake/*/selection.tsv
+          key: ${{ steps.saved-key.outputs.key }}
+          fail-on-cache-miss: true
+      - name: check the saved entry holds the maps and no raw records
+        if: ${{ !cancelled() }}
+        run: python3 .github/selftest.py entry --raw absent
 
       # A pull request from a depth-1 checkout: restores the map, fetches the base, selects.
       - if: ${{ !cancelled() }}

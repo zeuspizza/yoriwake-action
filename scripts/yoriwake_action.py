@@ -1,6 +1,6 @@
 """The decisions the yoriwake action makes outside Gradle.
 
-Five subcommands, each run by one step of `action.yml` and each reading its facts from the
+Seven subcommands, each run by one step of `action.yml` and each reading its facts from the
 environment:
 
 - `deepen`: fetch the pull request's base and deepen a shallow clone until selection has a base
@@ -12,6 +12,8 @@ environment:
   observation report for upload.
 - `digests`: on a run that saved the map, stage every map's digest for upload as the artifact a
   pull request's `trusted` looks up. Answers `artifact-name`, `path` and `count`.
+- `stash` and `unstash`: move each task's `raw/` and `selection.tsv` out of the map directory
+  before the save, and back after it.
 
 Every path that cannot establish what selection needs ends in a run that selects nothing: only
 the exact word `true` counts as an established map or history, and anything this script cannot
@@ -788,6 +790,45 @@ def run_digests():
     set_outputs(artifact_name=artifact_name(key), path=str(stage), count=str(len(lines)))
 
 
+# Each task's undecoded records and selection record: never part of a saved entry. The save's
+# excluding paths match nothing (see action.yml), so only moving them out keeps them out.
+UNSAVED = ("raw", "selection.tsv")
+
+
+def stash_dir() -> Path | None:
+    state = state_dir()
+    return state / "unsaved" if state is not None else None
+
+
+def run_stash():
+    map_dir = Path(os.environ.get("YORIWAKE_MAP_DIR", ".gradle/yoriwake"))
+    stash = stash_dir()
+    if stash is None or not map_dir.is_dir():
+        return
+    moved = 0
+    for task_dir in sorted(path for path in map_dir.iterdir() if path.is_dir()):
+        for name in UNSAVED:
+            source = task_dir / name
+            if source.exists():
+                (stash / task_dir.name).mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(stash / task_dir.name / name))
+                moved += 1
+    print(f"moved {moved} raw/ directories and selection.tsv files aside for the save")
+
+
+def run_unstash():
+    map_dir = Path(os.environ.get("YORIWAKE_MAP_DIR", ".gradle/yoriwake"))
+    stash = stash_dir()
+    if stash is None or not stash.is_dir():
+        return
+    for task_stash in sorted(stash.iterdir()):
+        target = map_dir / task_stash.name
+        target.mkdir(parents=True, exist_ok=True)
+        for source in sorted(task_stash.iterdir()):
+            shutil.move(str(source), str(target / source.name))
+    shutil.rmtree(stash)
+
+
 def run_summary():
     started = os.environ.get("YORIWAKE_STARTED", "")
     since = float(started) if started.replace(".", "", 1).isdigit() else None
@@ -813,7 +854,8 @@ def run_summary():
 
 
 COMMANDS = {"flags": run_flags, "deepen": run_deepen, "trusted": run_trusted,
-            "summary": run_summary, "digests": run_digests}
+            "summary": run_summary, "digests": run_digests, "stash": run_stash,
+            "unstash": run_unstash}
 
 
 def main(argv):

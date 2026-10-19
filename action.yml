@@ -122,6 +122,10 @@ runs:
         echo "restore-prefix=$prefix" >> "$GITHUB_OUTPUT"
         echo "key=$prefix$SHA" >> "$GITHUB_OUTPUT"
 
+    # The excluding lines match nothing: actions/cache expands the paths without implicit
+    # descendants, so the directory is archived whole. They stay because the path list sets the
+    # entry's version, and a changed list would leave every entry saved so far unrestorable. The
+    # save step's neighbours keep `raw/` and `selection.tsv` out instead.
     - id: restore
       if: steps.setup.outcome == 'success'
       continue-on-error: true
@@ -281,6 +285,17 @@ runs:
           echo "::warning title=yoriwake::HEAD is $head, not the commit this run was started for ($GITHUB_SHA), so the map is not saved"
         fi
 
+    - id: stash
+      if: ${{ !cancelled() && steps.save-check.outputs.save == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" stash'
+
+    # Whatever the stash did: at worst the entry carries what it could not move.
     - id: save
       if: ${{ !cancelled() && steps.save-check.outputs.save == 'true' }}
       continue-on-error: true
@@ -291,6 +306,18 @@ runs:
           !${{ steps.setup.outputs.map-dir }}/*/raw
           !${{ steps.setup.outputs.map-dir }}/*/selection.tsv
         key: ${{ steps.setup.outputs.key }}
+
+    # Back where the job's later steps expect them, a complement job's upload of selection.tsv
+    # among them; on a cancelled run too, for the steps that run regardless.
+    - id: unstash
+      if: ${{ always() && steps.stash.outcome != 'skipped' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHON: ${{ steps.setup.outputs.python }}
+        YORIWAKE_STATE: ${{ steps.setup.outputs.state }}
+        YORIWAKE_MAP_DIR: ${{ steps.setup.outputs.map-dir }}
+      run: '"$PYTHON" "$GITHUB_ACTION_PATH/scripts/yoriwake_action.py" unstash'
 
     # The digests of what the save wrote, for pull requests to list. An exact-key hit saves
     # nothing, so it uploads nothing: the entry already holds an earlier run's maps.
