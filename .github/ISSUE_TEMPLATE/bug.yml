@@ -1,0 +1,74 @@
+name: Bug report
+description: Something the Action did wrong, or did not do.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every field is optional. Fill in what you can; a partial report is better than none.
+        Security issues go through the security policy, not here. A bug in the plugin itself
+        goes to yoriwake's bug form.
+
+  - type: dropdown
+    id: missed-test
+    attributes:
+      label: Did a test that should have run NOT run?
+      description: >-
+        The most important question on this form. A skipped test that would have failed is the
+        one defect this tool must never have. If you are not sure, say so.
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What the workflow ran, what you expected, what you got.
+    validations:
+      required: false
+
+  - type: input
+    id: action-version
+    attributes:
+      label: Action version
+      description: The `uses:` line, for example `zeuspizza/yoriwake-action@v0.4.0`.
+    validations:
+      required: false
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: The yoriwake plugin version the build applies.
+    validations:
+      required: false
+
+  - type: input
+    id: event
+    attributes:
+      label: Event
+      description: The event that started the run, for example `push` or `pull_request`.
+    validations:
+      required: false
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Job summary row or warning
+      description: >-
+        The job summary's row for the task, and any `yoriwake` warning the run printed.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: runner
+    attributes:
+      label: Runner
+      description: For example `ubuntu-24.04`, `macos-latest`, or a self-hosted runner's OS.
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/zeuspizza/yoriwake/security/policy
+    about: Report privately through GitHub private vulnerability reporting, not in a public issue.
+  - name: Report a bug in the yoriwake plugin
+    url: https://github.com/zeuspizza/yoriwake/issues/new?template=bug.yml
+    about: Selection, the coverage map or the plugin's output, rather than the Action.
