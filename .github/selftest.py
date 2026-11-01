@@ -6,6 +6,7 @@
     python3 .github/selftest.py mutate
     python3 .github/selftest.py craft <honest map directory>
     python3 .github/selftest.py cache-key <prefix> <key input> <suffix>
+    python3 .github/selftest.py recorded-jdk <prefix> <matched key>
     python3 .github/selftest.py entry --raw present|absent
     python3 .github/selftest.py check --outcome failure --kind select --ran selected ...
     python3 .github/selftest.py check ... --warning "actions: read"
@@ -16,6 +17,8 @@ in one job: the source unchanged, and no test results or map, so what the next r
 from the cache. `craft` writes into the fixture a copy of a recorded map edited so that the tests
 the mutation breaks seem to execute none of `Alpha`: selected from it without a check, the run
 skips them and passes. `cache-key` prints the key the action restores under for a `key` input.
+`recorded-jdk` prints the JDK a matched key names between `prefix` and its map format, so a pull
+request runs on the JDK main's entry was recorded on; another map format exits 3.
 `entry` asserts over the map directory: after the action, a task's `raw/` records are still there
 for the job's later steps; restored from the entry the action saved, none are, and the maps are.
 `check` asserts over what the fixture's tests did, from the test results and the plugin's
@@ -115,9 +118,32 @@ def craft(honest):
 
 def cache_key(prefix, key, suffix):
     """The action's cache key for a `key` input, with `suffix` where the commit goes."""
+    print(f"{prefix}{key}-map{map_format()}-{suffix}")
+
+
+OTHER_FORMAT = 3
+
+
+def map_format():
     with open("action.yml", encoding="utf-8") as handle:
-        version = re.search(r"MAP_FORMAT: '(\d+)'", handle.read()).group(1)
-    print(f"{prefix}{key}-map{version}-{suffix}")
+        return re.search(r"MAP_FORMAT: '(\d+)'", handle.read()).group(1)
+
+
+def recorded_jdk(prefix, matched):
+    """The JDK in a key saved under `<prefix><version>-map<format>-<commit>`."""
+    found = re.fullmatch(r"(.*)-map(\d+)-[^-]+", matched[len(prefix):])
+    if not matched.startswith(prefix) or not found:
+        print(f"FAIL: {matched!r} is not a key under {prefix!r}", file=sys.stderr)
+        return 1
+    version, fmt = found.groups()
+    if not version:
+        print(f"FAIL: {matched!r} names no JDK", file=sys.stderr)
+        return 1
+    if fmt != map_format():
+        print(f"{matched!r} is of map format {fmt}, not {map_format()}", file=sys.stderr)
+        return OTHER_FORMAT
+    print(version)
+    return 0
 
 
 def entry(raw):
@@ -252,6 +278,9 @@ def main():
     keying.add_argument("prefix")
     keying.add_argument("key")
     keying.add_argument("suffix")
+    recorded = commands.add_parser("recorded-jdk")
+    recorded.add_argument("prefix")
+    recorded.add_argument("matched")
     holding = commands.add_parser("entry")
     holding.add_argument("--raw", choices=("present", "absent"), required=True)
     assertion = commands.add_parser("check")
@@ -280,6 +309,8 @@ def main():
     if args.command == "cache-key":
         cache_key(args.prefix, args.key, args.suffix)
         return 0
+    if args.command == "recorded-jdk":
+        return recorded_jdk(args.prefix, args.matched)
     if args.command == "entry":
         return entry(args.raw)
     return check(args)

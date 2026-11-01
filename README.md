@@ -208,7 +208,9 @@ Each of these leaves the trusted-map list empty, so the pull request records eve
 
 The plugin can still run everything on a run the action asked to select, for its own reasons (no
 usable map, a change it cannot see through, a requested full run); the summary's "Forced or
-declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
+declined" column names them, and `./gradlew yoriwakeExplainTest` explains them. One of them is a
+test JDK other than the one the map was recorded on, as after a runner image update: pull requests
+run every test until the next push to the default branch records on the new JDK.
 
 ## What it never does
 
@@ -224,12 +226,13 @@ declined" column names them, and `./gradlew yoriwakeExplainTest` explains them.
 `.github/workflows/test.yml` takes a `plugin-ref` when dispatched: a full commit SHA, a branch or a
 tag, since `actions/checkout` reads a short SHA as a branch name.
 
-On a push to `main` and on every pull request it also runs the action on the real events: the
-push records and uploads the digests, and each pull request then narrows from `main`'s entry,
-runs everything when it restores a crafted entry it planted under `main`'s key, and records every
-test when its token lacks `actions: read` (with the permission warning on a private repository). A pull request before `main` has an
-entry warns and proves nothing. These jobs, and a dispatched run without `plugin-ref`, apply the
-plugin release `fixture/settings.gradle.kts` names.
+On a push to `main` and on every pull request it also runs the action on the real events: the push
+records and uploads the digests, and each pull request then narrows from `main`'s entry on the JDK
+that entry was recorded on, which its key names, runs everything when it restores a crafted entry it
+planted under `main`'s key, and records every test when its token lacks `actions: read` (with the
+permission warning on a private repository). A pull request before `main` has an entry warns and
+proves nothing. These jobs, and a dispatched run without `plugin-ref`, apply the plugin release
+`fixture/settings.gradle.kts` names.
 
 Maintainer's one-time check, which no workflow can open for itself: a pull request from a fork.
 Its run gets a fork's read-only token and runs the same jobs; they should end as on a pull request

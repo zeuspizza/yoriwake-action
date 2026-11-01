@@ -17,9 +17,10 @@ name: test
 # Real events prove what a dispatched run cannot: the cache scopes GitHub gives a push to main
 # and a pull request, and the lookup against GitHub's own record of the runs. A push to main
 # records and uploads the digests (job `provenance`); each pull request then restores main's
-# entry and narrows (`honest`), restores an entry it planted in its own scope under main's key
-# and runs everything as map-untrusted (`shadow`), and, with a token lacking `actions: read` as a
-# fork's can, records with the permission warning (`no-actions-read`). They run the released
+# entry and narrows (`honest`) on the JDK that entry's key names, restores an entry it planted in
+# its own scope under main's key and runs everything as map-untrusted (`shadow`), and, with a
+# token lacking `actions: read` as a fork's can, records with the permission warning
+# (`no-actions-read`). They run the released
 # plugin the fixture names. A pull request opened before main has an entry warns and proves
 # nothing. A real fork pull request is the maintainer's one-time check (see the
 # README's "Its own tests"); this workflow does not open one.
@@ -132,19 +133,15 @@ jobs:
         run: >-
           sed -n 's/.*getOrElse("\(.*\)").*/ORG_GRADLE_PROJECT_yoriwakeVersion=\1/p'
           pr/fixture/settings.gradle.kts | tee -a "$GITHUB_ENV" | grep -q .
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-      - name: cache key prefix
+      # Each case's key names the JDK its entry was recorded on, as setup-java reported it, so a
+      # pull request can install that exact JDK: on another one yoriwake rightly runs every test,
+      # and a Temurin release between main's push and the pull request would fail `honest`.
+      - name: lookup prefix
         env:
           OS: ${{ runner.os }}
           WORKFLOW: ${{ github.workflow }}
           CASE: ${{ matrix.case }}
-        run: |
-          prefix=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-" "$CASE" '')
-          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+        run: echo "LOOKUP=yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-$CASE-jdk" >> "$GITHUB_ENV"
 
       # Until a push to main saves this case's entry there is nothing to restore. The push's own
       # check fails when it saves or uploads nothing, so a pull request only says so and stops.
@@ -156,11 +153,51 @@ jobs:
             fixture/.gradle/yoriwake
             !fixture/.gradle/yoriwake/*/raw
             !fixture/.gradle/yoriwake/*/selection.tsv
-          key: ${{ env.PREFIX }}none
-          restore-keys: ${{ env.PREFIX }}
+          key: ${{ env.LOOKUP }}none
+          restore-keys: ${{ env.LOOKUP }}
           lookup-only: true
       - if: github.event_name == 'pull_request' && steps.main-entry.outputs.cache-matched-key == ''
-        run: echo "::warning title=provenance::no entry under $PREFIX on main yet, so this run proves nothing"
+        run: echo "::warning title=provenance::no entry under $LOOKUP on main yet, so this run proves nothing"
+      # An entry of another map format is no entry for this pull request's action. setup-java
+      # reports a runner's preinstalled JDK as 21.0.13+9 and one it downloaded as 21.0.13+9.0.LTS,
+      # and matches an exact version only in its own spelling: a JDK this runner lacks is asked
+      # for in the download's.
+      - id: recorded
+        if: steps.main-entry.outputs.cache-matched-key != ''
+        env:
+          MATCHED: ${{ steps.main-entry.outputs.cache-matched-key }}
+        run: |
+          status=0
+          jdk=$(cd pr && python3 .github/selftest.py recorded-jdk "$LOOKUP" "$MATCHED") || status=$?
+          case "$status" in
+            0)
+              java=$jdk
+              case "$jdk" in
+                *+*.*) ;;
+                *) test -d "$RUNNER_TOOL_CACHE/Java_Temurin-Hotspot_jdk/${jdk/+/-}/x64" || java="$jdk.0.LTS" ;;
+              esac
+              echo "jdk=$jdk" >> "$GITHUB_OUTPUT"
+              echo "java=$java" >> "$GITHUB_OUTPUT"
+              ;;
+            3) echo "::warning title=provenance::main's newest entry, $MATCHED, is of another map format, so this run proves nothing" ;;
+            *) exit "$status" ;;
+          esac
+
+      - id: java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: ${{ steps.recorded.outputs.java || '21' }}
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: cache key prefix
+        env:
+          OS: ${{ runner.os }}
+          WORKFLOW: ${{ github.workflow }}
+          CASE_KEY: ${{ matrix.case }}-jdk${{ steps.recorded.outputs.jdk || steps.java.outputs.version }}
+        run: |
+          prefix=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-" "$CASE_KEY" '')
+          echo "CASE_KEY=$CASE_KEY" >> "$GITHUB_ENV"
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
 
       # A push to main records every test, saves the map and uploads its digests.
       - id: record
@@ -168,7 +205,7 @@ jobs:
         uses: ./pr
         with:
           working-directory: fixture
-          key: ${{ matrix.case }}
+          key: ${{ env.CASE_KEY }}
           isolated-capture: true
       - name: check the push recorded and uploaded the digests
         if: github.event_name == 'push'
@@ -183,17 +220,17 @@ jobs:
           test "$count" -ge 1
 
       # Honest: main's entry, vouched for by the push that saved it, narrows.
-      - if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+      - if: steps.recorded.outputs.jdk != '' && matrix.case == 'honest'
         run: python3 pr/.github/selftest.py mutate
       - id: honest
-        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+        if: steps.recorded.outputs.jdk != '' && matrix.case == 'honest'
         continue-on-error: true # the change breaks two tests
         uses: ./pr
         with:
           working-directory: fixture
-          key: honest
+          key: ${{ env.CASE_KEY }}
       - name: check the pull request narrowed from main's map
-        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'honest'
+        if: steps.recorded.outputs.jdk != '' && matrix.case == 'honest'
         env:
           ACTION_OUTCOME: ${{ steps.honest.outcome }}
           RUN_KIND: ${{ steps.honest.outputs.run-kind }}
@@ -207,7 +244,7 @@ jobs:
       # reverted workflow edit can. Its scope is searched first, the lookup lists main's honest
       # digests for that key, and the plugin refuses the crafted map.
       - id: plant-source
-        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        if: steps.recorded.outputs.jdk != '' && matrix.case == 'shadow'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -232,19 +269,19 @@ jobs:
             !fixture/.gradle/yoriwake/*/raw
             !fixture/.gradle/yoriwake/*/selection.tsv
           key: ${{ steps.plant-source.outputs.cache-matched-key }}
-      - if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+      - if: steps.recorded.outputs.jdk != '' && matrix.case == 'shadow'
         run: |
           python3 pr/.github/selftest.py reset
           python3 pr/.github/selftest.py mutate
       - id: shadow
-        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        if: steps.recorded.outputs.jdk != '' && matrix.case == 'shadow'
         continue-on-error: true # the change breaks two tests
         uses: ./pr
         with:
           working-directory: fixture
-          key: shadow
+          key: ${{ env.CASE_KEY }}
       - name: check a planted entry under main's key runs every test as map-untrusted
-        if: steps.main-entry.outputs.cache-matched-key != '' && matrix.case == 'shadow'
+        if: steps.recorded.outputs.jdk != '' && matrix.case == 'shadow'
         env:
           ACTION_OUTCOME: ${{ steps.shadow.outcome }}
           RUN_KIND: ${{ steps.shadow.outputs.run-kind }}
@@ -296,7 +333,7 @@ jobs:
           OS: ${{ runner.os }}
           WORKFLOW: ${{ github.workflow }}
         run: |
-          source=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-provenance-" honest '')
+          source="yoriwake-$OS-$WORKFLOW-provenance-honest-jdk"
           prefix=$(cd pr && python3 .github/selftest.py cache-key "yoriwake-$OS-$WORKFLOW-$GITHUB_JOB-" '' '')
           echo "SOURCE=$source" >> "$GITHUB_ENV"
           echo "PREFIX=$prefix" >> "$GITHUB_ENV"
@@ -309,11 +346,19 @@ jobs:
             !fixture/.gradle/yoriwake/*/selection.tsv
           key: ${{ env.SOURCE }}none
           restore-keys: ${{ env.SOURCE }}
+      # Main's newest honest entry of any JDK, but only of this pull request's map format.
       - id: plant
         if: steps.plant-source.outputs.cache-matched-key != ''
         env:
           MATCHED: ${{ steps.plant-source.outputs.cache-matched-key }}
-        run: echo "key=$PREFIX${MATCHED##*-}" >> "$GITHUB_OUTPUT"
+        run: |
+          status=0
+          (cd pr && python3 .github/selftest.py recorded-jdk "$SOURCE" "$MATCHED") || status=$?
+          case "$status" in
+            0) echo "key=$PREFIX${MATCHED##*-}" >> "$GITHUB_OUTPUT" ;;
+            3) echo "::warning title=provenance::main's newest entry, $MATCHED, is of another map format, so this run proves nothing" ;;
+            *) exit "$status" ;;
+          esac
       - if: steps.plant.outputs.key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -322,7 +367,7 @@ jobs:
             !fixture/.gradle/yoriwake/*/raw
             !fixture/.gradle/yoriwake/*/selection.tsv
           key: ${{ steps.plant.outputs.key }}
-      - if: steps.plant.outputs.key == ''
+      - if: steps.plant-source.outputs.cache-matched-key == ''
         run: echo "::warning title=provenance::no entry under $SOURCE on main yet, so this run proves nothing"
       - if: steps.plant.outputs.key != ''
         run: |
