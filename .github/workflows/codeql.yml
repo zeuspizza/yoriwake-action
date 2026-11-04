@@ -1,0 +1,48 @@
+name: codeql
+
+# CodeQL code scanning of the workflows and action.yml, the Python scripts and the demo build's Java
+# sources, with its results in the repository's Security tab.
+#
+# Only a push to main that changes more than Markdown runs it, never a pull request: a pull
+# request's checks already fill the runners a public repository gets at once, and the push that
+# merges it is analysed within the hour. No schedule either: the pinned action fixes the queries
+# until a pin bump, which is itself a push to main. Dispatch is for a maintainer who wants a fresh
+# analysis.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No concurrency group: each push to main is analysed on its own.
+jobs:
+  analyze:
+    name: analyze ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Nothing here needs a build: the Java is the demo build's, analysed from source. The repo
+        # holds no Kotlin sources (its two .kts files are build scripts).
+        include:
+          - language: java-kotlin
+          - language: python
+          - language: actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          category: /language:${{ matrix.language }}
